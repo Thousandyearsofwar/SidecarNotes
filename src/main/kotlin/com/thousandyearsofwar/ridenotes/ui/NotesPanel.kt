@@ -706,11 +706,13 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             children.forEach { child ->
                 if (child.second == 0) {
                     val group = child.third as GroupNode
-                    // 克隆组：实时展开**源组**的子项（只读），源组变了这里立刻跟着变
-                    val rowMirror = mirrorId ?: group.mirrorOf?.let { group.id }
+                    // 克隆组节点本身是可编辑的（可拖拽/改名/删除），只有它展开出来的子项是只读镜像。
+                    val isCloneNode = mirrorId == null && group.mirrorOf != null
+                    val rowMirror = mirrorId
+                    val childMirror = if (isCloneNode) group.id else mirrorId
                     val sourceId = if (mirrorId != null) group.id else (group.mirrorOf ?: group.id)
                     val row = GroupRow(group, depth, rowMirror)
-                    val nested = build(sourceId, depth + 1, rowMirror)
+                    val nested = build(sourceId, depth + 1, childMirror)
                     if (nested.isNotEmpty() || !filtering) {
                         out.add(row)
                         if (filtering || row.id !in collapsed) out.addAll(nested)
@@ -1248,6 +1250,12 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             is NoteItemRow, is StaleRow, is StaleHeaderRow -> return
 
             is GroupRow -> {
+                if (mode == 1 && target.group.mirrorOf != null) {
+                    com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
+                        project, "克隆组是只读镜像，不能把内容拖进去"
+                    )
+                    return
+                }
                 if (mode == 1) {
                     // 拖进分组：整批放到该组子项末尾
                     val list = siblings(target.group.id)

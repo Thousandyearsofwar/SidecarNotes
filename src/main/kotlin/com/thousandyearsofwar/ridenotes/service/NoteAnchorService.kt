@@ -856,6 +856,12 @@ class NoteAnchorService(private val project: Project) {
         val index0 = index()
         val group = index0.group(id) ?: return
         if (parentId == id || isAncestor(id, parentId)) return
+        group.mirrorOf?.let { source ->
+            if (parentId == source || isAncestor(source, parentId)) {
+                com.thousandyearsofwar.ridenotes.util.NoteLog.warn("refuse placing clone group into its source subtree")
+                return
+            }
+        }
 
         val keys = mixedKeys(parentId, excludeGroupId = id)
         val orderValue = orderAt(keys, index)
@@ -879,6 +885,13 @@ class NoteAnchorService(private val project: Project) {
     fun moveGroupTo(id: String, parentId: String?, orderValue: Double) {
         val group = index().group(id) ?: return
         if (parentId == id || isAncestor(id, parentId)) return
+        // 克隆组不能放进自己源组的子树里：展开时会递归镜像自己
+        group.mirrorOf?.let { source ->
+            if (parentId == source || isAncestor(source, parentId)) {
+                com.thousandyearsofwar.ridenotes.util.NoteLog.warn("refuse moving clone group into its source subtree")
+                return
+            }
+        }
         group.parentId = parentId
         group.orderValue = orderValue
         saveIndex()
