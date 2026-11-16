@@ -57,7 +57,7 @@ class TagDef(
  * 项目级索引：分组树 + 锚点归属 + 标签库。放在 `.ridenotes/_project.json`。
  */
 class ProjectIndex(
-    var schema: Int = 2,
+    var schema: Int = 4,
     var groups: MutableList<GroupNode> = mutableListOf(),
     var placements: MutableList<Placement> = mutableListOf(),
     var tags: MutableList<TagDef> = mutableListOf(),

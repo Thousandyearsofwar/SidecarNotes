@@ -382,6 +382,8 @@ class NoteAnchorService(private val project: Project) {
                 .onFailure { com.thousandyearsofwar.ridenotes.util.NoteLog.warn("migration failed: ${it.message}") }
             runCatching { migrateOrder(loaded) }
                 .onFailure { com.thousandyearsofwar.ridenotes.util.NoteLog.warn("order migration failed: ${it.message}") }
+            runCatching { migrateVirtualCloneGroups(loaded) }
+                .onFailure { com.thousandyearsofwar.ridenotes.util.NoteLog.warn("clone migration failed: ${it.message}") }
         }
         return loaded
     }
@@ -538,6 +540,9 @@ class NoteAnchorService(private val project: Project) {
             return
         }
 
+        // 源组被删：指向它的克隆组也一并移除，避免留下空镜像
+        index.groups.filter { it.mirrorOf == id }.toList().forEach { deleteCloneSubtree(index, it) }
+
         // 子组上移一层
         index.groups.filter { it.parentId == id }.forEach { it.parentId = group.parentId }
         index.groups.remove(group)
@@ -598,61 +603,27 @@ class NoteAnchorService(private val project: Project) {
         }
 
     /**
-     * 在面板里给分组创建一个**克隆组**：整棵子树在列表里多一份（组 + 克隆节点），
-     * 编辑器完全不渲染；笔记内容仍然跟随源锚点。
+     * 在面板里给分组创建一个**克隆组**：只加一个组节点，展开时实时显示**源组**的子树。
      *
-     * 克隆是一次性快照：之后往源组里新增的分组/锚点不会自动出现在克隆组里。
+     * 不复制任何锚点/子组，所以源组增删改会立刻反映到克隆组；克隆组是只读视图。
      */
     fun createCloneGroup(sourceGroupId: String): com.thousandyearsofwar.ridenotes.model.GroupNode? {
         val index = index()
         val found = index.group(sourceGroupId) ?: return null
-        // 克隆的克隆：直接克隆最初那个源组，避免套娃
+        // 克隆的克隆：直接指向最初那个源组，避免套娃
         val source = found.mirrorOf?.let { index.group(it) } ?: found
 
-        val clone = cloneGroupRecursive(source, source.parentId, source.orderValue + 0.5, 0)
-        saveIndex()
-        com.thousandyearsofwar.ridenotes.util.NoteLog.info(
-            "create clone group ${clone.id} of ${source.id}"
-        )
-        return clone
-    }
-
-    private fun cloneGroupRecursive(
-        source: com.thousandyearsofwar.ridenotes.model.GroupNode,
-        parentId: String?,
-        orderValue: Double,
-        depth: Int
-    ): com.thousandyearsofwar.ridenotes.model.GroupNode {
-        val index = index()
         val clone = com.thousandyearsofwar.ridenotes.model.GroupNode(
             title = source.title,
-            parentId = parentId,
-            order = index.nextOrder(parentId),
-            color = source.color,
-            visible = source.visible,
-            locked = source.locked,
-            compact = source.compact,
-            tags = source.tags.toMutableList()
+            parentId = source.parentId,
+            order = index.nextOrder(source.parentId),
+            color = source.color
         )
         clone.mirrorOf = source.id
-        clone.orderValue = orderValue
+        clone.orderValue = source.orderValue + 0.5
         index.groups.add(clone)
         saveIndex()
-
-        if (depth >= 8) return clone
-
-        // 子组：递归克隆
-        index.groups
-            .filter { it.parentId == source.id && it.id != clone.id }
-            .sortedBy { it.orderValue }
-            .forEachIndexed { i, child -> cloneGroupRecursive(child, clone.id, i + 1.0, depth + 1) }
-
-        // 锚点：在克隆组里放"克隆节点"（面板别名）
-        allAnchors()
-            .filter { it.groupId == source.id && it.mirrorOf == null }
-            .sortedBy { it.orderValue }
-            .forEachIndexed { i, anchor -> createCloneNodeIn(anchor.id, clone.id, i + 1.0) }
-
+        com.thousandyearsofwar.ridenotes.util.NoteLog.info("create clone group ${clone.id} of ${source.id}")
         return clone
     }
 
@@ -730,6 +701,48 @@ class NoteAnchorService(private val project: Project) {
     /** 按 id 定位锚点，返回「分片相对路径 + 锚点」，供超链接跳转用。 */
     fun locateAnchor(anchorId: String): Pair<String, Anchor>? = findAnchor(anchorId)
 
+    /**
+     * schema 3 → 4：克隆组从"物化快照"改成"实时镜像"。
+     *
+     * 0.89.0 的克隆组里存过一份真实的子组/克隆节点副本，这里把它们清掉，
+     * 只保留克隆组节点本身（面板展开时动态读源组）。
+     */
+    private fun migrateVirtualCloneGroups(index: com.thousandyearsofwar.ridenotes.model.ProjectIndex) {
+        if (index.schema >= 4) return
+
+        val topMirrors = index.groups.filter { it.mirrorOf != null }
+        if (topMirrors.isNotEmpty()) {
+            val descendants = mutableSetOf<String>()
+            fun collect(parentId: String) {
+                index.groups.filter { it.parentId == parentId }.forEach {
+                    descendants.add(it.id)
+                    collect(it.id)
+                }
+            }
+            topMirrors.forEach { collect(it.id) }
+            index.groups.removeIf { it.id in descendants }
+
+            val staleGroupIds = topMirrors.map { it.id }.toSet() + descendants
+            cache.forEach { (path, list) ->
+                val removed = list.filter { it.groupId in staleGroupIds }
+                if (removed.isNotEmpty()) {
+                    list.removeAll(removed)
+                    persist(path)
+                }
+            }
+            AnchorStore.listAll(project).forEach { shard ->
+                if (cache.containsKey(shard.file)) return@forEach
+                if (shard.anchors.none { it.groupId in staleGroupIds }) return@forEach
+                val list = shard.anchors.filterNot { it.groupId in staleGroupIds }.toMutableList()
+                cache[shard.file] = list
+                AnchorStore.save(project, shard.file, list)
+            }
+        }
+
+        index.schema = 4
+        saveIndex()
+        com.thousandyearsofwar.ridenotes.util.NoteLog.info("migrated clone groups to virtual mirrors")
+    }
     /** 克隆锚点的源锚点；不是克隆、或源已被删除时返回 null。 */
     fun mirrorSource(anchor: Anchor): Anchor? =
         anchor.mirrorOf?.let { sourceId -> findAnchor(sourceId)?.second }

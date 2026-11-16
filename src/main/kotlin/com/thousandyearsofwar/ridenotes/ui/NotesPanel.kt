@@ -46,8 +46,16 @@ sealed class Row(val depth: Int) {
     abstract val id: String
 }
 
-class GroupRow(val group: GroupNode, depth: Int) : Row(depth) {
-    override val id: String get() = group.id
+class GroupRow(val group: GroupNode, depth: Int, val mirrorId: String? = null) : Row(depth) {
+    override val id: String get() = if (mirrorId == null) group.id else "m:$mirrorId:${group.id}"
+}
+
+/** 克隆组展开出来的行：只读视图，操作都作用在源组上（这里禁止改动）。 */
+fun Row.isMirror(): Boolean = when (this) {
+    is GroupRow -> mirrorId != null
+    is NoteRow -> mirrorId != null
+    is NoteItemRow -> mirrorId != null
+    else -> false
 }
 
 class NoteRow(
@@ -55,9 +63,10 @@ class NoteRow(
     val anchor: Anchor,
     depth: Int,
     /** 刷新时算好的"原文已变更"标记，渲染器只读这个字段，不做任何 I/O。 */
-    val changed: Boolean = false
+    val changed: Boolean = false,
+    val mirrorId: String? = null
 ) : Row(depth) {
-    override val id: String get() = anchor.id
+    override val id: String get() = if (mirrorId == null) anchor.id else "m:$mirrorId:${anchor.id}"
 }
 
 /** 锚点下的一条笔记（子节点）。 */
@@ -65,9 +74,10 @@ class NoteItemRow(
     val relativePath: String,
     val anchor: Anchor,
     val note: com.thousandyearsofwar.ridenotes.model.Note,
-    depth: Int
+    depth: Int,
+    val mirrorId: String? = null
 ) : Row(depth) {
-    override val id: String get() = note.id
+    override val id: String get() = if (mirrorId == null) note.id else "m:$mirrorId:${note.id}"
 }
 
 /** "无法定位"分组的表头。 */
@@ -340,8 +350,8 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                     label.border = JBUI.Borders.emptyLeft(4 + (item?.depth ?: 0) * 16)
                     when (item) {
                         is GroupRow -> {
-                            val arrow = if (hasChildren(item.group.id)) {
-                                if (item.group.id in collapsed) "\u25B8 " else "\u25BE "
+                            val arrow = if (hasChildren(item.group)) {
+                                if (item.id in collapsed) "\u25B8 " else "\u25BE "
                             } else "  "
                             label.icon = AllIcons.Nodes.Folder
                             val defaultMark = if (item.group.id == service.defaultGroupId()) " <font color=\u0027#8a8a8a\u0027>默认</font>" else ""
@@ -529,9 +539,9 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                         val onArrow = e.x in arrowX..(arrowX + 14)
                         when (item) {
                             is GroupRow -> {
-                                if (item.group.id in collapsed || hasChildren(item.group.id)) {
+                                if (item.id in collapsed || hasChildren(item.group)) {
                                     if (onArrow || e.clickCount >= 2) {
-                                        toggleCollapse(item.group.id)
+                                        toggleCollapse(item.id)
                                     }
                                 }
                             }
@@ -683,7 +693,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                 compareBy({ it.second.orderValue }, { it.second.startLine })
             )
 
-        fun build(groupId: String?, depth: Int): MutableList<Row> {
+        fun build(groupId: String?, depth: Int, mirrorId: String? = null): MutableList<Row> {
             val out = mutableListOf<Row>()
 
             // 组和锚点共用 orderValue，可以任意穿插（schema 3）
@@ -696,18 +706,24 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             children.forEach { child ->
                 if (child.second == 0) {
                     val group = child.third as GroupNode
-                    val nested = build(group.id, depth + 1)
+                    // 克隆组：实时展开**源组**的子项（只读），源组变了这里立刻跟着变
+                    val rowMirror = mirrorId ?: group.mirrorOf?.let { group.id }
+                    val sourceId = if (mirrorId != null) group.id else (group.mirrorOf ?: group.id)
+                    val row = GroupRow(group, depth, rowMirror)
+                    val nested = build(sourceId, depth + 1, rowMirror)
                     if (nested.isNotEmpty() || !filtering) {
-                        out.add(GroupRow(group, depth))
-                        if (filtering || group.id !in collapsed) out.addAll(nested)
+                        out.add(row)
+                        if (filtering || row.id !in collapsed) out.addAll(nested)
                     }
                 } else {
                     @Suppress("UNCHECKED_CAST")
                     val (path, anchor) = child.third as Pair<String, Anchor>
                     if (!matchesFilter(anchor, path)) return@forEach
-                    out.add(NoteRow(path, anchor, depth, changedById[anchor.id] ?: false))
+                    out.add(NoteRow(path, anchor, depth, changedById[anchor.id] ?: false, mirrorId))
                     if (anchor.notes.size > 1 && (filtering || anchor.id in expandedNotes)) {
-                        anchor.notes.forEach { note -> out.add(NoteItemRow(path, anchor, note, depth + 1)) }
+                        anchor.notes.forEach { note ->
+                            out.add(NoteItemRow(path, anchor, note, depth + 1, mirrorId))
+                        }
                     }
                 }
             }
@@ -939,6 +955,10 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
+    /** 克隆组按源组判断有没有子项。 */
+    private fun hasChildren(group: GroupNode): Boolean =
+        hasChildren(group.mirrorOf ?: group.id)
+
     private fun hasChildren(groupId: String): Boolean {
         val index = service.index()
         return index.groups.any { it.parentId == groupId } ||
@@ -1025,6 +1045,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** 多选打标签：分组加/删组标签，笔记行作用于其全部笔记，单条笔记行作用于该条。 */
     private fun attachTagToSelection() {
+        if (blockMirrorEdit()) return
         val groups = selectedGroupRows()
         val noteRows = selectedNoteRows()
         val noteItems = selectedNoteItems()
@@ -1177,6 +1198,10 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             listOfNotNull(model.rows.getOrNull(sourceRow))
         }.filter { it is GroupRow || it is NoteRow }
         if (dragged.isEmpty()) return
+        if (dragged.any { it.isMirror() } || target.isMirror()) {
+            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "克隆组是只读视图，请到源分组操作")
+            return
+        }
 
         val sourceGroupIds = dragged.filterIsInstance<GroupRow>().map { it.group.id }.toSet()
         val sourceAnchorIds = dragged.filterIsInstance<NoteRow>().map { it.anchor.id }.toSet()
@@ -1270,6 +1295,13 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
     // ---------------------------------------------------------------- 动作
 
+    /** 克隆组是只读视图：选中镜像行时禁止改动，给出提示。 */
+    private fun blockMirrorEdit(rows: List<Row> = selectionRows()): Boolean {
+        if (rows.none { it.isMirror() }) return false
+        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "克隆组是只读视图，请到源分组操作")
+        return true
+    }
+
     private fun selectedRow(): Row? = model.rows.getOrNull(table.selectedRow)
 
     // ---------------------------------------------------------------- 多选
@@ -1296,6 +1328,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** 全选区内状态一致时反向切换：有任意一条可见就全部隐藏，否则全部显示。 */
     private fun toggleVisibleForSelection() {
+        if (blockMirrorEdit()) return
         val rows = selectionRows().filter { it is GroupRow || it is NoteRow }
         if (rows.isEmpty()) return
         // 用"生效值"判断方向：父组隐藏时子组也视为隐藏
@@ -1353,6 +1386,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun toggleLockForSelection() {
+        if (blockMirrorEdit()) return
         val rows = selectionRows().filter { it is GroupRow || it is NoteRow }
         if (rows.isEmpty()) return
         val turnOn = rows.any {
@@ -1384,6 +1418,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun toggleCompactForSelection() {
+        if (blockMirrorEdit()) return
         val rows = selectionRows().filter { it is GroupRow || it is NoteRow }
         if (rows.isEmpty()) return
         val turnOn = rows.any {
@@ -1404,6 +1439,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun applyColor(row: Row, color: Int) = applyColorToSelection(color)
 
     private fun applyColorToSelection(color: Int) {
+        if (blockMirrorEdit()) return
         val groups = selectedGroupRows()
         val anchors = selectedNoteRows()
         if (groups.isEmpty() && anchors.isEmpty()) return
@@ -1550,6 +1586,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun renameSelected() {
         com.thousandyearsofwar.ridenotes.util.NoteLog.info("rename requested, selectedRow=${table.selectedRow}")
+        if (blockMirrorEdit(listOfNotNull(selectedRow()))) return
         when (val row = selectedRow()) {
             is GroupRow -> {
                 val title = Messages.showInputDialog(project, "分组标题", "重命名", null, row.group.title, null) ?: return
@@ -1724,6 +1761,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** 多选后批量移除标题。 */
     private fun removeTitles() {
+        if (blockMirrorEdit()) return
         val rows = table.selectedRows.toList().mapNotNull { model.rows.getOrNull(it) }
         val targets = rows.filterIsInstance<NoteRow>().map { it.relativePath to it.anchor.id }
         if (targets.isEmpty()) {
@@ -1752,12 +1790,12 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         if (changed) refresh()
 
-        var index = model.rows.indexOfFirst { it.id == anchorId }
+        var index = model.rows.indexOfFirst { it is NoteRow && it.anchor.id == anchorId && !it.isMirror() }
         if (index < 0 && isFiltering()) {
             filterField.text = ""
             filterTags.clear()
             refresh()
-            index = model.rows.indexOfFirst { it.id == anchorId }
+            index = model.rows.indexOfFirst { it is NoteRow && it.anchor.id == anchorId && !it.isMirror() }
         }
         if (index < 0) return
 
@@ -1790,9 +1828,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
         dataDirty = true
         refresh()
-        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
-            project, "已创建克隆组（含 ${service.index().groups.count { it.parentId == clone.id }} 个子组）"
-        )
+        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "已创建克隆组（实时镜像源分组）")
     }
 
     /** 右键锚点 → 在同一个分组里追加一个克隆节点（不新增代码区间，也不渲染）。 */
@@ -1808,6 +1844,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
     /** 把选中的锚点移进指定分组（null = 根级）。 */
     private fun moveSelectionToGroup(groupId: String?) {
+        if (blockMirrorEdit()) return
         val targets = selectedNoteRows()
         if (targets.isEmpty()) {
             com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "请先选中要移动的笔记")
@@ -1822,6 +1859,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     /** 新建一个分组，并把当前选中的锚点放进去。 */
     private fun groupSelectionIntoNewGroup() {
+        if (blockMirrorEdit()) return
         val targets = selectedNoteRows()
         if (targets.isEmpty()) {
             com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "请先选中要分组的笔记")
@@ -1858,6 +1896,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun deleteSelected() {
+        if (blockMirrorEdit()) return
         val rows = table.selectedRows.toList().mapNotNull { model.rows.getOrNull(it) }
         if (rows.isEmpty()) return
 
