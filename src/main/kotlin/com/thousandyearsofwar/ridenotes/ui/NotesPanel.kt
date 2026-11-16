@@ -477,9 +477,19 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                     table.selectionModel.leadSelectionIndex = table.pressedSelection.first()
                 }
                 table.dragging = true
-                val row = table.rowAtPoint(e.point)
+                var row = table.rowAtPoint(e.point)
                 if (row < 0) {
-                    table.clearDrop()
+                    // 拖到列表最后一行的下方：落到末尾（放在最后一项之后）
+                    val last = model.rowCount - 1
+                    val belowLast = last >= 0 &&
+                        e.y > table.getCellRect(last, 0, true).y + table.getCellRect(last, 0, true).height
+                    if (belowLast) {
+                        table.dropRow = last
+                        table.dropMode = 2
+                        table.repaint()
+                    } else {
+                        table.clearDrop()
+                    }
                     return
                 }
                 val rect = table.getCellRect(row, 0, true)
@@ -487,8 +497,9 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                 val target = model.rows.getOrNull(row)
                 val mode = if (target is GroupRow) {
                     when {
-                        ratio < 0.10 -> 0
-                        ratio > 0.90 -> 2
+                        // 组：上 1/4 插到前面、下 1/4 插到后面、中间 1/2 放进去
+                        ratio < 0.25 -> 0
+                        ratio > 0.75 -> 2
                         else -> 1
                     }
                 } else {
