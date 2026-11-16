@@ -353,7 +353,11 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                 item.group.locked != effLocked ||
                                 item.group.compact != effCompact
                             val inheritedMark = if (inherited) " <font color=\u0027#8a8a8a\u0027>（继承）</font>" else ""
-                                label.text = "<html><b>${escape(arrow + item.group.title.ifBlank { "未命名分组" })}</b>$defaultMark" +
+                            // 克隆组：显示 ⧉ 且标题跟随源组
+                            val cloneMark = if (item.group.mirrorOf != null) "⧉ " else ""
+                            val shownTitle = service.resolvedGroupTitle(item.group)
+                                .ifBlank { "未命名分组" }
+                                label.text = "<html><b>${escape(arrow + cloneMark + shownTitle)}</b>$defaultMark" +
                                 flagsOf(effVisible, effLocked, effCompact) + inheritedMark +
                                 tagChipsOf(item.group.tags) + "</html>"
                         }
@@ -1777,6 +1781,20 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "已复制链接：$text")
     }
 
+    /** 右键分组 → 在面板里多出一棵同构的克隆组（编辑器不渲染，笔记内容跟随源锚点）。 */
+    private fun createCloneGroup(row: GroupRow) {
+        val clone = service.createCloneGroup(row.group.id)
+        if (clone == null) {
+            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "创建克隆组失败")
+            return
+        }
+        dataDirty = true
+        refresh()
+        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
+            project, "已创建克隆组（含 ${service.index().groups.count { it.parentId == clone.id }} 个子组）"
+        )
+    }
+
     /** 右键锚点 → 在同一个分组里追加一个克隆节点（不新增代码区间，也不渲染）。 */
     private fun createCloneNode(row: NoteRow) {
         val clone = service.createCloneNode(row.anchor.id)
@@ -1982,6 +2000,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
 
         if (row is GroupRow) {
+            menu.add("创建克隆组").addActionListener { createCloneGroup(row) }
             if (service.defaultGroupId() == row.group.id) {
                 menu.add("取消默认分组").addActionListener {
                     service.setDefaultGroup(null)

@@ -17,6 +17,8 @@ class GroupNode(
     override var order: Int = 0,
     /** 与锚点共用的混排顺序键（schema 3 起）：组和锚点可以任意穿插。 */
     var orderValue: Double = 0.0,
+    /** 克隆组：指向源分组 id，只在面板里多显示一份，编辑器不渲染。 */
+    var mirrorOf: String? = null,
     var locked: Boolean = false,
     var compact: Boolean = false,
     var tags: MutableList<String> = mutableListOf()

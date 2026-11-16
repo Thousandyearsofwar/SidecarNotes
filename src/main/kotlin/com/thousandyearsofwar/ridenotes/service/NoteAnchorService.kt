@@ -509,9 +509,35 @@ class NoteAnchorService(private val project: Project) {
         saveIndex()
     }
 
+    /** 递归删除克隆子树：子组、组内克隆节点（面板别名）一并清掉。 */
+    private fun deleteCloneSubtree(
+        index: com.thousandyearsofwar.ridenotes.model.ProjectIndex,
+        group: com.thousandyearsofwar.ridenotes.model.GroupNode
+    ) {
+        index.groups.filter { it.parentId == group.id }.toList().forEach { deleteCloneSubtree(index, it) }
+        index.groups.remove(group)
+
+        cache.forEach { (path, list) ->
+            val removed = list.filter { it.groupId == group.id }
+            if (removed.isNotEmpty()) {
+                list.removeAll(removed)
+                persist(path)
+            }
+        }
+    }
+
     fun deleteGroup(id: String) {
         val index = index()
         val group = index.group(id) ?: return
+
+        // 克隆组：整棵子树都是面板别名，直接删掉，不要往父级搬（否则会散落一堆空节点）
+        if (group.mirrorOf != null) {
+            deleteCloneSubtree(index, group)
+            if (index.defaultGroupId == id) index.defaultGroupId = group.parentId
+            saveIndex()
+            return
+        }
+
         // 子组上移一层
         index.groups.filter { it.parentId == id }.forEach { it.parentId = group.parentId }
         index.groups.remove(group)
@@ -572,10 +598,77 @@ class NoteAnchorService(private val project: Project) {
         }
 
     /**
+     * 在面板里给分组创建一个**克隆组**：整棵子树在列表里多一份（组 + 克隆节点），
+     * 编辑器完全不渲染；笔记内容仍然跟随源锚点。
+     *
+     * 克隆是一次性快照：之后往源组里新增的分组/锚点不会自动出现在克隆组里。
+     */
+    fun createCloneGroup(sourceGroupId: String): com.thousandyearsofwar.ridenotes.model.GroupNode? {
+        val index = index()
+        val found = index.group(sourceGroupId) ?: return null
+        // 克隆的克隆：直接克隆最初那个源组，避免套娃
+        val source = found.mirrorOf?.let { index.group(it) } ?: found
+
+        val clone = cloneGroupRecursive(source, source.parentId, source.orderValue + 0.5, 0)
+        saveIndex()
+        com.thousandyearsofwar.ridenotes.util.NoteLog.info(
+            "create clone group ${clone.id} of ${source.id}"
+        )
+        return clone
+    }
+
+    private fun cloneGroupRecursive(
+        source: com.thousandyearsofwar.ridenotes.model.GroupNode,
+        parentId: String?,
+        orderValue: Double,
+        depth: Int
+    ): com.thousandyearsofwar.ridenotes.model.GroupNode {
+        val index = index()
+        val clone = com.thousandyearsofwar.ridenotes.model.GroupNode(
+            title = source.title,
+            parentId = parentId,
+            order = index.nextOrder(parentId),
+            color = source.color,
+            visible = source.visible,
+            locked = source.locked,
+            compact = source.compact,
+            tags = source.tags.toMutableList()
+        )
+        clone.mirrorOf = source.id
+        clone.orderValue = orderValue
+        index.groups.add(clone)
+        saveIndex()
+
+        if (depth >= 8) return clone
+
+        // 子组：递归克隆
+        index.groups
+            .filter { it.parentId == source.id && it.id != clone.id }
+            .sortedBy { it.orderValue }
+            .forEachIndexed { i, child -> cloneGroupRecursive(child, clone.id, i + 1.0, depth + 1) }
+
+        // 锚点：在克隆组里放"克隆节点"（面板别名）
+        allAnchors()
+            .filter { it.groupId == source.id && it.mirrorOf == null }
+            .sortedBy { it.orderValue }
+            .forEachIndexed { i, anchor -> createCloneNodeIn(anchor.id, clone.id, i + 1.0) }
+
+        return clone
+    }
+
+    /** 分组的显示名：克隆组跟随源组标题。 */
+    fun resolvedGroupTitle(group: com.thousandyearsofwar.ridenotes.model.GroupNode): String {
+        val source = group.mirrorOf?.let { index().group(it) } ?: return group.title
+        return source.title
+    }
+
+    /**
      * 在面板里给锚点创建一个**克隆节点**：只是列表里的别名，
      * 不占用新的代码区间，也不在编辑器里渲染任何内容。
      */
-    fun createCloneNode(sourceId: String): Anchor? {
+    fun createCloneNode(sourceId: String): Anchor? = createCloneNodeIn(sourceId, null, -1.0)
+
+    private fun createCloneNodeIn(sourceId: String, targetGroupId: String?, order: Double): Anchor? {
         val (path, found) = findAnchor(sourceId) ?: return null
         val source = mirrorSource(found) ?: found
         val basePath = project.basePath ?: return null
@@ -594,9 +687,9 @@ class NoteAnchorService(private val project: Project) {
             contextAfter = source.contextAfter
         )
         clone.mirrorOf = source.id
-        clone.groupId = source.groupId
-        // 紧跟在源锚点后面
-        clone.orderValue = source.orderValue + 0.5
+        clone.groupId = targetGroupId ?: source.groupId
+        // 默认紧跟在源锚点后面；克隆组内部按顺序排
+        clone.orderValue = if (order > 0.0) order else source.orderValue + 0.5
         clone.createdBy = resolveAuthor(project)
         addAnchor(file, clone)
         com.thousandyearsofwar.ridenotes.util.NoteLog.info("create clone node ${clone.id} of ${source.id}")
