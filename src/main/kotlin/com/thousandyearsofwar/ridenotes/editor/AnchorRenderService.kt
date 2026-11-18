@@ -837,6 +837,9 @@ class AnchorRenderService(private val project: Project) {
         /** 打开链接目标：跳到源文件对应行，并让面板定位到该锚点。 */
         /** 打开笔记里的链接：`anchor:` 跳锚点，本地 md/html 在编辑器里打开，http(s)/mailto 交给浏览器。 */
         private fun openLink(href: String) {
+            com.thousandyearsofwar.ridenotes.util.NoteLog.info(
+                "open link href=[$href] embed=${com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(href)}"
+            )
             when {
                 href.startsWith("anchor:", ignoreCase = true) ->
                     openAnchorLink(href.removePrefix("anchor:").removePrefix("ANCHOR:"))
@@ -860,7 +863,12 @@ class AnchorRenderService(private val project: Project) {
         private fun openAnchorLink(anchorId: String) {
             val found = NoteAnchorService.get(project).locateAnchor(anchorId)
             if (found == null) {
-                com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "链接目标已被删除")
+                // 兼容旧写法：链接被写成 anchor:<本地路径>，按文件引用处理
+                if (com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(anchorId)) {
+                    com.thousandyearsofwar.ridenotes.ui.EmbedOpener.open(project, anchorId)
+                } else {
+                    com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "链接目标已被删除")
+                }
                 return
             }
             val (path, target) = found
