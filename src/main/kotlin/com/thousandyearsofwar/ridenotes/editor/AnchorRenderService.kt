@@ -816,12 +816,12 @@ class AnchorRenderService(private val project: Project) {
                     return
                 }
 
-                // 点中正文里的锚点链接：直接跳转（不进入编辑）
+                // 点中正文里的链接：按 href 分派（anchor: / 本地文件 / 网页）
                 val linkTarget = (inlay.renderer as? SummaryBlockRenderer)
                     ?.linkAt(inlay, event.mouseEvent.x, event.mouseEvent.y)
                 if (linkTarget != null) {
                     event.consume()
-                    openAnchorLink(linkTarget)
+                    openLink(linkTarget)
                     return
                 }
 
