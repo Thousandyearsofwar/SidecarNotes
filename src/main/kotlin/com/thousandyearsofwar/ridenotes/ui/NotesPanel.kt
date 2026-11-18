@@ -1831,6 +1831,18 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     /**
      * 把选中的锚点克隆到编辑器当前选区：位置是新的，内容跟随源锚点。
      */
+    /** 打开这条笔记里引用的第一个本地文件（html 走内置浏览器预览）。 */
+    private fun openEmbedOf(row: NoteRow) {
+        val body = service.resolvedNotes(row.anchor).joinToString("\n") { it.body }
+        val href = com.thousandyearsofwar.ridenotes.model.NoteLinks.parse(body)
+            .firstOrNull { com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(it.href) }?.href
+        if (href == null) {
+            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "这条笔记没有引用本地文件")
+            return
+        }
+        EmbedOpener.open(project, href)
+    }
+
     /** 把锚点复制成 Markdown 链接，粘到任意笔记里就能跳回来。 */
     private fun copyAnchorLink(row: NoteRow) {
         val title = service.resolvedTitle(row.anchor).ifBlank { row.anchor.displayTitle }
@@ -2085,6 +2097,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             menu.add("追加笔记").addActionListener { addNoteDialog(row) }
             menu.add("创建克隆节点").addActionListener { createCloneNode(row) }
             menu.add("复制锚点链接").addActionListener { copyAnchorLink(row) }
+            menu.add("打开引用的文件").addActionListener { openEmbedOf(row) }
             menu.add(buildMoveToGroupMenu())
             menu.add("添加标签…").addActionListener { attachTagToAnchor(row) }
             if (service.resolvedNotes(row.anchor).size > 1) {                val label = if (row.anchor.id in expandedNotes) "收起笔记" else "展开笔记"

@@ -850,40 +850,8 @@ class AnchorRenderService(private val project: Project) {
                         }
                 }
 
-                com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(href) -> {
-                    val file = com.thousandyearsofwar.ridenotes.model.NoteEmbeds.resolve(project.basePath, href)
-                    if (file == null) {
-                        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "引用文件不存在：$href")
-                        return
-                    }
-                    val lower = file.name.lowercase()
-                    if (lower.endsWith(".html") || lower.endsWith(".htm")) {
-                        // 摘要块里只能画文字，真正的 HTML 用 IDE 内置浏览器渲染（JCEF）
-                        runCatching {
-                            val html = file.readText()
-                            com.intellij.openapi.fileEditor.impl.HTMLEditorProvider
-                                .openEditor(project, file.name, html)
-                        }.onFailure {
-                            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
-                                project, "HTML 预览失败：${it.message}"
-                            )
-                        }
-                    } else {
-                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
-                            .refreshAndFindFileByPath(file.absolutePath)
-                        if (vf == null) {
-                            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "引用文件不存在：$href")
-                        } else {
-                            runCatching {
-                                com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
-                                    .openTextEditor(
-                                        com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, 0),
-                                        true
-                                    )
-                            }
-                        }
-                    }
-                }
+                com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(href) ->
+                    com.thousandyearsofwar.ridenotes.ui.EmbedOpener.open(project, href)
                 else -> com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
                     project, "不支持的链接：$href"
                 )

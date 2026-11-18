@@ -76,7 +76,8 @@ object NoteEmbeds {
             if (file == null) {
                 out.add("（引用文件不存在：${link.href}）")
             } else {
-                out.add("📄 ${file.name}")
+                // 保留成链接：块里是可点的"📄 文件名"，点了打开预览
+                out.add(NoteLinks.format("📄 ${file.name}", link.href))
                 val text = runCatching { file.readText() }.getOrDefault("")
                 val converted = if (link.href.substringBefore('#').lowercase().endsWith(".html") ||
                     link.href.lowercase().endsWith(".htm")
