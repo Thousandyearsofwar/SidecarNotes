@@ -204,51 +204,53 @@ private class SummaryBlockRenderer(
      * 几何优先用 inlay.bounds（平台给的位置），paint 记录只作兜底。
      */
     fun linkAt(inlay: Inlay<*>, px: Int, py: Int): String? {
-        // 快路径：绘制时算好的矩形，命中判断零分配、零测宽
-        paintedLinks.forEach { link ->
-            if (px in link.x1..link.x2 && py in link.y1..link.y2) return link.target
-        }
+        // 不再依赖绘制时缓存的矩形：滚动/换行/字体变化都可能让它过期。
+        // 直接按"当前布局"重算一次，成本只有几次 stringWidth，点击频率极低。
+        val bounds = runCatching { inlay.bounds }.getOrNull() ?: return null
+        val component = inlay.editor.contentComponent
+        val baseMetrics = component.getFontMetrics(font)
+        val lines = text.split('\n').map { it.trimEnd() }.ifEmpty { listOf("") }
+        val lineHeight = baseMetrics.height
 
-        val bounds = runCatching { inlay.bounds }.getOrNull()
-        val metrics = paintedMetrics ?: inlay.editor.contentComponent.getFontMetrics(font)
-        val left = bounds?.x ?: paintedLeft
-        val top = bounds?.y ?: paintedTop
-        val indent = indent(inlay)
-        val available = ((bounds?.width ?: 400) - indent - 24).coerceAtLeast(20)
+        val top = bounds.y
+        if (py < top || py > top + lines.size * lineHeight + 8) return null
+        val lineIndex = ((py - top - 2) / lineHeight).coerceIn(0, lines.size - 1)
 
-        val allLines = text.split('\n').map { it.trimEnd() }.ifEmpty { listOf("") }
-        val lineHeight = metrics.height
-        if (py < top || py > top + allLines.size * lineHeight + 8) {
-            com.thousandyearsofwar.ridenotes.util.NoteLog.info(
-                "link miss: py=$py not in $top..${top + allLines.size * lineHeight + 8} bounds=$bounds"
-            )
-            return null
-        }
-        val lineIndex = ((py - top - 2) / lineHeight).coerceIn(0, allLines.size - 1)
-        // 和绘制保持一致：先吃掉链接标记拼成显示文本，再截断
-        val rendered = StringBuilder()
-        val ranges = mutableListOf<Triple<Int, Int, String>>()
-        NoteLinks.segments(allLines[lineIndex]).forEach { part ->
-            if (part.href == null) {
-                rendered.append(part.text)
-            } else {
-                val from = rendered.length
-                rendered.append(part.text)
-                ranges.add(Triple(from, rendered.length, part.href))
+        val fmCache = HashMap<Font, java.awt.FontMetrics>()
+        fun widthOfRun(runFont: Font, value: String): Int =
+            FontFallback.segments(runFont, value).sumOf { (fallbackFont, part) ->
+                fmCache.getOrPut(fallbackFont) { component.getFontMetrics(fallbackFont) }.stringWidth(part)
             }
+
+        fun ellipsizeTo(runFont: Font, value: String, maxWidth: Int): String {
+            if (value.isEmpty() || maxWidth <= 0) return ""
+            if (widthOfRun(runFont, value) <= maxWidth) return value
+            var low = 0
+            var high = value.length
+            while (low < high) {
+                val mid = (low + high + 1) / 2
+                val candidate = value.substring(0, mid) + "…"
+                if (widthOfRun(runFont, candidate) <= maxWidth) low = mid else high = mid - 1
+            }
+            return if (low <= 0) "" else value.substring(0, low) + "…"
         }
-        val line = ellipsize(metrics, rendered.toString(), available)
-        val originX = left + indent + 8
-        for ((from, to, href) in ranges) {
-            if (from >= line.length) continue
-            val end = to.coerceAtMost(line.length)
-            val startX = originX + metrics.stringWidth(line.substring(0, from))
-            val endX = startX + metrics.stringWidth(line.substring(from, end))
-            if (px in startX..endX) return href
+
+        val textLeft = bounds.x + indent(inlay) + 8
+        var x = textLeft
+        var remaining = (bounds.width - indent(inlay) - 24).coerceAtLeast(20)
+
+        for (run in NoteRichText.parseLine(lines[lineIndex])) {
+            if (remaining <= 0) break
+            val runFont = fontFor(run.style)
+            val visible = ellipsizeTo(runFont, run.text, remaining)
+            if (visible.isEmpty()) continue
+            val runWidth = widthOfRun(runFont, visible)
+            if (run.style.href != null && px in x..(x + runWidth)) return run.style.href
+            x += runWidth
+            remaining -= runWidth
         }
         return null
     }
-
     /**
      * 宽度：默认跟随窗口（贴着右边缘）；设置里填了 >0 才作为上限。
      * 必须用 scrollingModel.visibleArea（视口），contentComponent.width 是内容宽度，横向滚动时会更大。
