@@ -34,6 +34,7 @@ import java.awt.Rectangle
 import java.awt.RenderingHints
 import javax.swing.Icon
 import com.thousandyearsofwar.ridenotes.model.NoteLinks
+import com.thousandyearsofwar.ridenotes.model.NoteRichText
 
 /** 可视区上下各留多少行做块渲染，超出部分只保留色带和 gutter 图标。 */
 private const val MARGIN = 200
@@ -157,6 +158,9 @@ private class LineEndRenderer(private val colorIndex: Int) : EditorCustomElement
  *
  * 标题和该锚点的所有笔记在**同一个块**里；笔记首行右侧右对齐显示时间。
  */
+private val LINK_COLOR: java.awt.Color = java.awt.Color(0x3D, 0x7E, 0xC7)
+private val CODE_COLOR: java.awt.Color = java.awt.Color(0xB0, 0x5E, 0x00)
+
 private class SummaryBlockRenderer(
     private val anchor: Anchor,
     private val text: String,
@@ -333,56 +337,57 @@ private class SummaryBlockRenderer(
                     (width - 16 - metrics.stringWidth(stamp) - 12).coerceAtLeast(20)
                 }
 
-                // 先把链接标记吃掉，拼成"纯显示文本 + 链接区间"，再截断。
-                // 否则截断可能切掉 `</a>`，正则失效，块里就露出原始标签。
-                val rendered = StringBuilder()
-                val renderedLinks = mutableListOf<Triple<Int, Int, String>>()
-                NoteLinks.segments(line).forEach { part ->
-                    if (part.href == null) {
-                        rendered.append(part.text)
-                    } else {
-                        val from = rendered.length
-                        rendered.append(part.text)
-                        renderedLinks.add(Triple(from, rendered.length, part.href))
-                    }
-                }
-                val visible = ellipsize(metrics, rendered.toString(), stampedWidth)
-                visibleLines.add(visible)
-
+                // 行内富文本：Markdown / HTML 的粗体、斜体、删除线、行内代码、链接、颜色
+                val runs = NoteRichText.parseLine(line)
                 var x = textLeft
-                var cursor = 0
-                renderedLinks.forEach { (from, to, href) ->
-                    if (from >= visible.length) return@forEach
-                    val linkEnd = to.coerceAtMost(visible.length)
-                    if (from > cursor) {
-                        g2.color = JBColor.foreground()
-                        x = drawWithFallback(g2, visible.substring(cursor, from), x, baseline, metricsCache)
+                var remaining = stampedWidth
+                val drawn = StringBuilder()
+
+                for (run in runs) {
+                    if (remaining <= 0) break
+                    val runFont = fontFor(run.style)
+                    val text = ellipsizeWidth(g2, metricsCache, runFont, run.text, remaining)
+                    if (text.isEmpty()) continue
+                    drawn.append(text)
+
+                    g2.color = run.style.color
+                        ?: when {
+                            run.style.href != null -> LINK_COLOR
+                            run.style.code -> CODE_COLOR
+                            else -> JBColor.foreground()
+                        }
+
+                    val startX = x
+                    x = drawWithFallback(g2, text, x, baseline, runFont, metricsCache)
+                    val runWidth = x - startX
+
+                    if (run.style.underline && runWidth > 0) {
+                        g2.drawLine(startX, baseline + 2, x, baseline + 2)
                     }
-                    g2.color = Color(0x3D, 0x7E, 0xC7)
-                    val linkText = visible.substring(from, linkEnd)
-                    val linkStartX = x
-                    x = drawWithFallback(g2, linkText, x, baseline, metricsCache)
-                    if (x > linkStartX) g2.drawLine(linkStartX, baseline + 2, x, baseline + 2)
-                    newLinks.add(
-                        PaintedLink(
-                            x1 = linkStartX,
-                            x2 = x,
-                            y1 = targetRegion.y + 2 + index * metrics.height,
-                            y2 = targetRegion.y + 2 + (index + 1) * metrics.height,
-                            target = href
+                    if (run.style.strike && runWidth > 0) {
+                        g2.drawLine(startX, baseline - metrics.ascent / 3, x, baseline - metrics.ascent / 3)
+                    }
+                    if (run.style.href != null) {
+                        newLinks.add(
+                            PaintedLink(
+                                x1 = startX,
+                                x2 = x,
+                                y1 = targetRegion.y + 2 + index * metrics.height,
+                                y2 = targetRegion.y + 2 + (index + 1) * metrics.height,
+                                target = run.style.href
+                            )
                         )
-                    )
-                    cursor = linkEnd
+                    }
+
+                    remaining -= runWidth
                 }
-                if (cursor < visible.length) {
-                    g2.color = JBColor.foreground()
-                    x = drawWithFallback(g2, visible.substring(cursor), x, baseline, metricsCache)
-                }
+                visibleLines.add(drawn.toString())
 
                 if (stamp.isNotEmpty()) {
                     g2.color = Color(0x99, 0x99, 0x99)
                     g2.drawString(stamp, left + width - 8 - metrics.stringWidth(stamp), baseline)
                 }
+
                 baseline += metrics.height
             }
             paintedLines = visibleLines
@@ -433,37 +438,65 @@ private class SummaryBlockRenderer(
         return cachedLines
     }
 
-    /** 按字体回退逐段绘制，返回结束 x。等宽字体本身没有中文，直接 drawString 会变方块。 */
+    /** 根据样式派生字体（粗体/斜体）。 */
+    private fun fontFor(style: NoteRichText.Style): Font {
+        var f = font
+        if (style.bold) f = f.deriveFont(f.style or Font.BOLD)
+        if (style.italic) f = f.deriveFont(f.style or Font.ITALIC)
+        return f
+    }
+
+    /** 按字体回退逐段绘制，返回结束 x。 */
     private fun drawWithFallback(
         g: Graphics2D,
         text: String,
         startX: Int,
         baseline: Int,
+        baseFont: Font,
         metricsCache: MutableMap<Font, java.awt.FontMetrics>
     ): Int {
         if (text.isEmpty()) return startX
         var x = startX
-        FontFallback.segments(font, text).forEach { (runFont, part) ->
+        FontFallback.segments(baseFont, text).forEach { (runFont, part) ->
             g.font = runFont
             g.drawString(part, x, baseline)
-            val metrics = metricsCache.getOrPut(runFont) { g.getFontMetrics(runFont) }
-            x += metrics.stringWidth(part)
+            val m = metricsCache.getOrPut(runFont) { g.getFontMetrics(runFont) }
+            x += m.stringWidth(part)
         }
-        g.font = font
+        g.font = baseFont
         return x
     }
 
-    /** 与 drawWithFallback 一致的宽度计算（用于截断与右对齐）。 */
-    private fun widthWithFallback(
+    /** 把文本截断到最大宽度（按当前字体测量）。 */
+    private fun ellipsizeWidth(
         g: Graphics2D,
+        metricsCache: MutableMap<Font, java.awt.FontMetrics>,
+        baseFont: Font,
         text: String,
-        metricsCache: MutableMap<Font, java.awt.FontMetrics>
+        maxWidth: Int
+    ): String {
+        if (text.isEmpty() || maxWidth <= 0) return ""
+        if (widthOf(g, metricsCache, baseFont, text) <= maxWidth) return text
+        var low = 0
+        var high = text.length
+        while (low < high) {
+            val mid = (low + high + 1) / 2
+            val candidate = text.substring(0, mid) + "…"
+            if (widthOf(g, metricsCache, baseFont, candidate) <= maxWidth) low = mid else high = mid - 1
+        }
+        return if (low <= 0) "" else text.substring(0, low) + "…"
+    }
+
+    private fun widthOf(
+        g: Graphics2D,
+        metricsCache: MutableMap<Font, java.awt.FontMetrics>,
+        baseFont: Font,
+        text: String
     ): Int {
-        if (text.isEmpty()) return 0
         var width = 0
-        FontFallback.segments(font, text).forEach { (runFont, part) ->
-            val metrics = metricsCache.getOrPut(runFont) { g.getFontMetrics(runFont) }
-            width += metrics.stringWidth(part)
+        FontFallback.segments(baseFont, text).forEach { (runFont, part) ->
+            val m = metricsCache.getOrPut(runFont) { g.getFontMetrics(runFont) }
+            width += m.stringWidth(part)
         }
         return width
     }
@@ -657,6 +690,7 @@ class AnchorRenderService(private val project: Project) {
         val compact = service.effectiveCompact(anchor)
         return buildString {
             append(settings.maxWidth).append(':').append(settings.fontSize).append(':').append(color)
+            append(":rt3")
             append(':').append(if (settings.showSummary) 1 else 0)
             append(':').append(if (compact) 1 else 0)
             append('|').append(service.resolvedTitle(anchor))
@@ -801,22 +835,38 @@ class AnchorRenderService(private val project: Project) {
         }
 
         /** 打开链接目标：跳到源文件对应行，并让面板定位到该锚点。 */
-        /** 打开笔记里的链接：`anchor:` 跳锚点，http(s) 交给系统浏览器，其它协议忽略并提示。 */
+        /** 打开笔记里的链接：`anchor:` 跳锚点，本地 md/html 在编辑器里打开，http(s)/mailto 交给浏览器。 */
         private fun openLink(href: String) {
             when {
                 href.startsWith("anchor:", ignoreCase = true) ->
                     openAnchorLink(href.removePrefix("anchor:").removePrefix("ANCHOR:"))
 
                 href.startsWith("http://", ignoreCase = true) ||
-                    href.startsWith("https://", ignoreCase = true) -> {
+                    href.startsWith("https://", ignoreCase = true) ||
+                    href.startsWith("mailto:", ignoreCase = true) -> {
                     runCatching { com.intellij.ide.BrowserUtil.browse(href) }
                         .onFailure {
                             com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "打开链接失败：${it.message}")
                         }
                 }
 
-                href.startsWith("mailto:", ignoreCase = true) -> {
-                    runCatching { com.intellij.ide.BrowserUtil.browse(href) }
+                com.thousandyearsofwar.ridenotes.model.NoteEmbeds.isEmbedHref(href) -> {
+                    val file = com.thousandyearsofwar.ridenotes.model.NoteEmbeds.resolve(project.basePath, href)
+                    val vf = file?.let {
+                        com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+                            .refreshAndFindFileByPath(it.absolutePath)
+                    }
+                    if (vf == null) {
+                        com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "引用文件不存在：$href")
+                    } else {
+                        runCatching {
+                            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+                                .openTextEditor(
+                                    com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, 0),
+                                    true
+                                )
+                        }
+                    }
                 }
 
                 else -> com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
@@ -824,8 +874,6 @@ class AnchorRenderService(private val project: Project) {
                 )
             }
         }
-
-        /** 打开链接目标：跳到源文件对应行，并让面板定位到该锚点。 */
         private fun openAnchorLink(anchorId: String) {
             val found = NoteAnchorService.get(project).locateAnchor(anchorId)
             if (found == null) {
@@ -1021,7 +1069,8 @@ class AnchorRenderService(private val project: Project) {
             fun noteLines(note: com.thousandyearsofwar.ridenotes.model.Note): List<String> {
                 val body = note.body.trim()
                 if (body.isEmpty()) return emptyList()
-                return body.lines()
+                // 链接指向本地 md / html 时，把文件内容展开进块里渲染
+                return com.thousandyearsofwar.ridenotes.model.NoteEmbeds.expandBody(project.basePath, body)
             }
 
             service.resolvedNotes(item.anchor).forEach { note ->
@@ -1110,7 +1159,7 @@ class AnchorRenderService(private val project: Project) {
             val resolved = svc.resolvedNotes(anchor)
             if (resolved.isNotEmpty()) append("  ·  ${resolved.size} 条")
             resolved.firstOrNull()?.let {
-                append("\n").append(com.thousandyearsofwar.ridenotes.model.NoteLinks.strip(it.body).take(80))
+                append("\n").append(com.thousandyearsofwar.ridenotes.model.NoteRichText.plain(it.body).take(80))
             }
             if (anchor.mirrorOf != null) append("\n（克隆锚点，跟随源锚点）")
             append("\n双击就地编辑")

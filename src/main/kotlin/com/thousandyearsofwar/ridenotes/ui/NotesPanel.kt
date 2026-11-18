@@ -378,8 +378,8 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                             val arrow = if (anchorNotes.size > 1) {
                                 if (item.anchor.id in expandedNotes) "\u25BE " else "\u25B8 "
                             } else "  "
-                            val previewRaw = com.thousandyearsofwar.ridenotes.model.NoteLinks
-                                .strip(anchorNotes.firstOrNull()?.body.orEmpty())
+                            val previewRaw = com.thousandyearsofwar.ridenotes.model.NoteRichText
+                                .plain(anchorNotes.firstOrNull()?.body.orEmpty())
                                 .replace("\n", " ").trim()
                             val tagsPlain = anchorNotes.flatMap { it.tags }.distinct()
                                 .joinToString(" ") { "#$it" }
