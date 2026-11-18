@@ -21,18 +21,44 @@ object NoteEmbeds {
     private val EXTENSIONS = listOf(".md", ".markdown", ".html", ".htm", ".txt")
 
     fun isEmbedHref(href: String): Boolean {
-        if (href.contains("://")) return false
         if (href.startsWith("anchor:", ignoreCase = true)) return false
+        if (href.contains("://") && !href.startsWith("file://", ignoreCase = true)) return false
         val path = href.substringBefore('#').substringBefore('?').lowercase()
         return EXTENSIONS.any { path.endsWith(it) }
     }
 
-    /** 把本地路径解析成绝对文件；`..` 会被规范化。 */
+    /**
+     * 把本地路径解析成绝对文件。
+     *
+     * 支持三种写法：
+     * - 项目相对路径：`diagrams/x.html`
+     * - 绝对路径：`E:/foo/x.html`（注意：不能用 `File(base, child)`，
+     *   在 Java 里绝对路径会拼到 base 后面）
+     * - `file:///E:/foo/x.html`
+     */
     fun resolve(basePath: String?, href: String): File? {
-        if (basePath == null) return null
-        val clean = href.substringBefore('#').substringBefore('?')
-        val file = runCatching { File(basePath, clean).canonicalFile }.getOrNull() ?: return null
-        return file.takeIf { it.isFile && it.length() <= MAX_FILE_BYTES }
+        var clean = href.substringBefore('#').substringBefore('?')
+        clean = when {
+            clean.startsWith("file:///", ignoreCase = true) -> clean.removePrefix("file:///").removePrefix("FILE:///")
+            clean.startsWith("file://", ignoreCase = true) -> clean.removePrefix("file://").removePrefix("FILE://")
+            else -> clean
+        }
+        // URL 编码（路径里的 %20 空格等）在 Windows 上很常见
+        clean = runCatching {
+            java.net.URLDecoder.decode(clean.replace("+", "%2B"), Charsets.UTF_8)
+        }.getOrDefault(clean)
+        // Windows 上前缀可能是 /E:/...
+        if (clean.length > 3 && clean[0] == '/' && clean[2] == ':') clean = clean.substring(1)
+
+        val asIs = File(clean)
+        val file = if (asIs.isAbsolute) {
+            asIs
+        } else {
+            val base = basePath ?: return null
+            File(base, clean)
+        }
+        val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return null
+        return canonical.takeIf { it.isFile && it.length() <= MAX_FILE_BYTES }
     }
 
     /**
