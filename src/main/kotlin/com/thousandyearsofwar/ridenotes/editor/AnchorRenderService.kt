@@ -1060,8 +1060,7 @@ class AnchorRenderService(private val project: Project) {
             fun noteLines(note: com.thousandyearsofwar.ridenotes.model.Note): List<String> {
                 val body = note.body.trim()
                 if (body.isEmpty()) return emptyList()
-                // 链接指向本地 md / html 时，把文件内容展开进块里渲染
-                return com.thousandyearsofwar.ridenotes.model.NoteEmbeds.expandBody(project.basePath, body)
+                return body.lines()
             }
 
             service.resolvedNotes(item.anchor).forEach { note ->

@@ -27,15 +27,7 @@ object NoteEmbeds {
         return EXTENSIONS.any { path.endsWith(it) }
     }
 
-    /**
-     * 把本地路径解析成绝对文件。
-     *
-     * 支持三种写法：
-     * - 项目相对路径：`diagrams/x.html`
-     * - 绝对路径：`E:/foo/x.html`（注意：不能用 `File(base, child)`，
-     *   在 Java 里绝对路径会拼到 base 后面）
-     * - `file:///E:/foo/x.html`
-     */
+
     fun resolve(basePath: String?, href: String): File? {
         var clean = href.substringBefore('#').substringBefore('?')
         clean = when {
@@ -59,94 +51,5 @@ object NoteEmbeds {
         }
         val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return null
         return canonical.takeIf { it.isFile && it.length() <= MAX_FILE_BYTES }
-    }
-
-    /**
-     * 把一行的引用展开成多行；没有引用返回 null。
-     */
-    fun expandLine(basePath: String?, line: String): List<String>? {
-        val links = NoteLinks.parse(line).filter { isEmbedHref(it.href) }
-        if (links.isEmpty()) return null
-
-        val out = mutableListOf<String>()
-        var cursor = 0
-        links.forEach { link ->
-            if (link.start > cursor) out.add(line.substring(cursor, link.start))
-            val file = resolve(basePath, link.href)
-            if (file == null) {
-                out.add("（引用文件不存在：${link.href}）")
-            } else {
-                // 保留成链接：块里是可点的"📄 文件名"，点了打开预览
-                out.add(NoteLinks.format("📄 ${file.name}", link.href))
-                val text = runCatching { file.readText() }.getOrDefault("")
-                val converted = if (link.href.substringBefore('#').lowercase().endsWith(".html") ||
-                    link.href.lowercase().endsWith(".htm")
-                ) {
-                    htmlToLines(text)
-                } else {
-                    markdownToLines(text)
-                }
-                out.addAll(converted.take(MAX_LINES_PER_EMBED))
-            }
-            cursor = link.end
-        }
-        if (cursor < line.length) out.add(line.substring(cursor))
-        return out
-    }
-
-    /** 整段正文按行展开引用。 */
-    fun expandBody(basePath: String?, body: String): List<String> {
-        val out = mutableListOf<String>()
-        body.lines().forEach { line ->
-            val expanded = expandLine(basePath, line)
-            if (expanded != null) out.addAll(expanded) else out.add(line)
-        }
-        return out
-    }
-
-    /** Markdown → 文本行：去掉块级标记，保留行内标记（由 NoteRichText 渲染）。 */
-    private fun markdownToLines(text: String): List<String> {
-        val out = mutableListOf<String>()
-        var inFence = false
-        text.lines().forEach { raw ->
-            val line = raw.trimEnd()
-            when {
-                line.trimStart().startsWith("```") -> {
-                    inFence = !inFence
-                }
-
-                inFence -> out.add("`" + line.trimEnd() + "`")
-
-                line.isBlank() -> out.add("")
-
-                line.matches(Regex("^\\s*([-*_])\\1{2,}\\s*$")) -> out.add("")
-
-                line.startsWith("#") -> out.add(line.trimStart('#').trim())
-
-                line.trimStart().startsWith("> ") -> out.add(line.trimStart().removePrefix("> "))
-
-                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") ->
-                    out.add("• " + line.trimStart().substring(2))
-
-                else -> out.add(line)
-            }
-        }
-        return out.ifEmpty { listOf("（空文件）") }
-    }
-
-    /** HTML → 文本行：先粗略去掉块级标签，行内标记留给 NoteRichText。 */
-    private fun htmlToLines(text: String): List<String> {
-        var s = text
-        s = Regex("(?is)<!--.*?-->").replace(s, "")
-        s = Regex("(?is)<(script|style)[^>]*>.*?</\\1>").replace(s, "")
-        s = Regex("(?i)<br\\s*/?>").replace(s, "\n")
-        s = Regex("(?i)</(p|div|li|tr|h[1-6])>").replace(s, "\n")
-        s = Regex("(?i)<li[^>]*>").replace(s, "• ")
-        s = Regex("(?i)<(p|div|ul|ol|table|tr|h[1-6])[^>]*>").replace(s, "")
-        s = Regex("(?i)<[^>]+>").replace(s, "")
-        return s.lines()
-            .map { it.trim() }
-            .filterIndexed { i, l -> l.isNotEmpty() || i > 0 }
-            .ifEmpty { listOf("（空文件）") }
     }
 }
