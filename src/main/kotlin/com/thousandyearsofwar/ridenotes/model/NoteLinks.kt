@@ -52,6 +52,31 @@ object NoteLinks {
         return found.sortedBy { it.start }
     }
 
+    /** 渲染用片段：普通文字 href=null，链接文字带 href。 */
+    data class Part(val text: String, val href: String?)
+
+    /**
+     * 把一行拆成"可直接绘制的片段"：链接只保留显示文字，HTML/Markdown 标记被吃掉。
+     *
+     * 渲染器用它先拼出纯显示字符串再截断，避免标记被截断后露出原文（`</a>` 被切掉时
+     * 正则匹配不上，块里就会看到原始标签）。
+     */
+    fun segments(text: String): List<Part> {
+        if (text.isEmpty()) return emptyList()
+        val links = parse(text)
+        if (links.isEmpty()) return listOf(Part(text, null))
+
+        val parts = mutableListOf<Part>()
+        var cursor = 0
+        links.forEach { link ->
+            if (link.start > cursor) parts.add(Part(text.substring(cursor, link.start), null))
+            parts.add(Part(link.text, link.href))
+            cursor = link.end
+        }
+        if (cursor < text.length) parts.add(Part(text.substring(cursor), null))
+        return parts
+    }
+
     /** 生成 Markdown 链接片段（锚点用 `anchor:` 前缀）。 */
     fun format(displayText: String, href: String): String {
         val clean = displayText.replace("[", "(").replace("]", ")").take(120)

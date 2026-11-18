@@ -221,16 +221,26 @@ private class SummaryBlockRenderer(
             return null
         }
         val lineIndex = ((py - top - 2) / lineHeight).coerceIn(0, allLines.size - 1)
-        val line = ellipsize(metrics, allLines[lineIndex], available)
+        // 和绘制保持一致：先吃掉链接标记拼成显示文本，再截断
+        val rendered = StringBuilder()
+        val ranges = mutableListOf<Triple<Int, Int, String>>()
+        NoteLinks.segments(allLines[lineIndex]).forEach { part ->
+            if (part.href == null) {
+                rendered.append(part.text)
+            } else {
+                val from = rendered.length
+                rendered.append(part.text)
+                ranges.add(Triple(from, rendered.length, part.href))
+            }
+        }
+        val line = ellipsize(metrics, rendered.toString(), available)
         val originX = left + indent + 8
-        val links = linksOf(line)
-        com.thousandyearsofwar.ridenotes.util.NoteLog.info(
-            "link hit: px=$px py=$py line=$lineIndex origin=$originX text='${line.take(60)}' links=${links.map { it.href }}"
-        )
-        for (link in links) {
-            val startX = originX + metrics.stringWidth(line.substring(0, link.start))
-            val endX = startX + metrics.stringWidth(line.substring(link.start, link.end))
-            if (px in startX..endX) return link.href
+        for ((from, to, href) in ranges) {
+            if (from >= line.length) continue
+            val end = to.coerceAtMost(line.length)
+            val startX = originX + metrics.stringWidth(line.substring(0, from))
+            val endX = startX + metrics.stringWidth(line.substring(from, end))
+            if (px in startX..endX) return href
         }
         return null
     }
@@ -322,33 +332,47 @@ private class SummaryBlockRenderer(
                 } else {
                     (width - 16 - metrics.stringWidth(stamp) - 12).coerceAtLeast(20)
                 }
-                val visible = ellipsize(metrics, line, stampedWidth)
+
+                // 先把链接标记吃掉，拼成"纯显示文本 + 链接区间"，再截断。
+                // 否则截断可能切掉 `</a>`，正则失效，块里就露出原始标签。
+                val rendered = StringBuilder()
+                val renderedLinks = mutableListOf<Triple<Int, Int, String>>()
+                NoteLinks.segments(line).forEach { part ->
+                    if (part.href == null) {
+                        rendered.append(part.text)
+                    } else {
+                        val from = rendered.length
+                        rendered.append(part.text)
+                        renderedLinks.add(Triple(from, rendered.length, part.href))
+                    }
+                }
+                val visible = ellipsize(metrics, rendered.toString(), stampedWidth)
                 visibleLines.add(visible)
 
                 var x = textLeft
                 var cursor = 0
-                linksOf(visible).forEach { link ->
-                    if (link.start > cursor) {
+                renderedLinks.forEach { (from, to, href) ->
+                    if (from >= visible.length) return@forEach
+                    val linkEnd = to.coerceAtMost(visible.length)
+                    if (from > cursor) {
                         g2.color = JBColor.foreground()
-                        val plain = visible.substring(cursor, link.start)
-                        x = drawWithFallback(g2, plain, x, baseline, metricsCache)
+                        x = drawWithFallback(g2, visible.substring(cursor, from), x, baseline, metricsCache)
                     }
                     g2.color = Color(0x3D, 0x7E, 0xC7)
-                    val linkText = visible.substring(link.start, link.end)
+                    val linkText = visible.substring(from, linkEnd)
                     val linkStartX = x
                     x = drawWithFallback(g2, linkText, x, baseline, metricsCache)
-                    val linkWidth = x - linkStartX
-                    g2.drawLine(linkStartX, baseline + 2, x, baseline + 2)
+                    if (x > linkStartX) g2.drawLine(linkStartX, baseline + 2, x, baseline + 2)
                     newLinks.add(
                         PaintedLink(
                             x1 = linkStartX,
                             x2 = x,
                             y1 = targetRegion.y + 2 + index * metrics.height,
                             y2 = targetRegion.y + 2 + (index + 1) * metrics.height,
-                            target = link.href
+                            target = href
                         )
                     )
-                    cursor = link.end
+                    cursor = linkEnd
                 }
                 if (cursor < visible.length) {
                     g2.color = JBColor.foreground()
