@@ -378,7 +378,9 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                             val arrow = if (anchorNotes.size > 1) {
                                 if (item.anchor.id in expandedNotes) "\u25BE " else "\u25B8 "
                             } else "  "
-                            val previewRaw = anchorNotes.firstOrNull()?.body?.replace("\n", " ")?.trim().orEmpty()
+                            val previewRaw = com.thousandyearsofwar.ridenotes.model.NoteLinks
+                                .strip(anchorNotes.firstOrNull()?.body.orEmpty())
+                                .replace("\n", " ").trim()
                             val tagsPlain = anchorNotes.flatMap { it.tags }.distinct()
                                 .joinToString(" ") { "#$it" }
                             val where = "${shortPath(item.relativePath)}:${item.anchor.startLine}"
@@ -1832,7 +1834,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     /** 把锚点复制成 Markdown 链接，粘到任意笔记里就能跳回来。 */
     private fun copyAnchorLink(row: NoteRow) {
         val title = service.resolvedTitle(row.anchor).ifBlank { row.anchor.displayTitle }
-        val text = com.thousandyearsofwar.ridenotes.model.NoteLinks.format(title, row.anchor.id)
+        val text = com.thousandyearsofwar.ridenotes.model.NoteLinks.anchorFormat(title, row.anchor.id)
         java.awt.Toolkit.getDefaultToolkit().systemClipboard
             .setContents(java.awt.datatransfer.StringSelection(text), null)
         com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "已复制链接：$text")

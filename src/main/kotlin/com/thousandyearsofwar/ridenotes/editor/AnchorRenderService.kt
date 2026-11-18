@@ -225,12 +225,12 @@ private class SummaryBlockRenderer(
         val originX = left + indent + 8
         val links = linksOf(line)
         com.thousandyearsofwar.ridenotes.util.NoteLog.info(
-            "link hit: px=$px py=$py line=$lineIndex origin=$originX text='${line.take(60)}' links=${links.map { it.targetId }}"
+            "link hit: px=$px py=$py line=$lineIndex origin=$originX text='${line.take(60)}' links=${links.map { it.href }}"
         )
         for (link in links) {
             val startX = originX + metrics.stringWidth(line.substring(0, link.start))
             val endX = startX + metrics.stringWidth(line.substring(link.start, link.end))
-            if (px in startX..endX) return link.targetId
+            if (px in startX..endX) return link.href
         }
         return null
     }
@@ -345,7 +345,7 @@ private class SummaryBlockRenderer(
                             x2 = x,
                             y1 = targetRegion.y + 2 + index * metrics.height,
                             y2 = targetRegion.y + 2 + (index + 1) * metrics.height,
-                            target = link.targetId
+                            target = link.href
                         )
                     )
                     cursor = link.end
@@ -777,6 +777,31 @@ class AnchorRenderService(private val project: Project) {
         }
 
         /** 打开链接目标：跳到源文件对应行，并让面板定位到该锚点。 */
+        /** 打开笔记里的链接：`anchor:` 跳锚点，http(s) 交给系统浏览器，其它协议忽略并提示。 */
+        private fun openLink(href: String) {
+            when {
+                href.startsWith("anchor:", ignoreCase = true) ->
+                    openAnchorLink(href.removePrefix("anchor:").removePrefix("ANCHOR:"))
+
+                href.startsWith("http://", ignoreCase = true) ||
+                    href.startsWith("https://", ignoreCase = true) -> {
+                    runCatching { com.intellij.ide.BrowserUtil.browse(href) }
+                        .onFailure {
+                            com.thousandyearsofwar.ridenotes.util.NoteLog.notify(project, "打开链接失败：${it.message}")
+                        }
+                }
+
+                href.startsWith("mailto:", ignoreCase = true) -> {
+                    runCatching { com.intellij.ide.BrowserUtil.browse(href) }
+                }
+
+                else -> com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
+                    project, "不支持的链接：$href"
+                )
+            }
+        }
+
+        /** 打开链接目标：跳到源文件对应行，并让面板定位到该锚点。 */
         private fun openAnchorLink(anchorId: String) {
             val found = NoteAnchorService.get(project).locateAnchor(anchorId)
             if (found == null) {
@@ -803,7 +828,6 @@ class AnchorRenderService(private val project: Project) {
                     .anchorActivated(anchorId)
             }
         }
-
         private fun moveCaretTo(anchor: Anchor) {
             runCatching {
                 editor.caretModel.moveToOffset(anchor.startOffset.coerceIn(0, editor.document.textLength))
@@ -1061,7 +1085,9 @@ class AnchorRenderService(private val project: Project) {
             append(svc.resolvedTitle(anchor).ifBlank { anchor.displayTitle })
             val resolved = svc.resolvedNotes(anchor)
             if (resolved.isNotEmpty()) append("  ·  ${resolved.size} 条")
-            resolved.firstOrNull()?.let { append("\n").append(it.body.take(80)) }
+            resolved.firstOrNull()?.let {
+                append("\n").append(com.thousandyearsofwar.ridenotes.model.NoteLinks.strip(it.body).take(80))
+            }
             if (anchor.mirrorOf != null) append("\n（克隆锚点，跟随源锚点）")
             append("\n双击就地编辑")
         }
