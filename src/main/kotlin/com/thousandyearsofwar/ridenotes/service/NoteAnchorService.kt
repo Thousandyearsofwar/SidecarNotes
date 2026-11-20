@@ -627,6 +627,26 @@ class NoteAnchorService(private val project: Project) {
         return clone
     }
 
+    /** 分组自身的标签 + 所有祖先分组的标签（就近优先，去重）。 */
+    fun effectiveGroupTags(groupId: String): List<String> {
+        val index = index()
+        val out = mutableListOf<String>()
+        var current = index.group(groupId)
+        var guard = 0
+        while (current != null && guard++ < 64) {
+            out.addAll(current.tags)
+            current = current.parentId?.let { index.group(it) }
+        }
+        return out.distinct()
+    }
+
+    /** 锚点的生效标签：自己的标签 + 所属分组链上的标签。 */
+    fun effectiveTags(anchor: Anchor): List<String> {
+        val out = mutableListOf<String>()
+        resolvedNotes(anchor).forEach { out.addAll(it.tags) }
+        anchor.groupId?.let { out.addAll(effectiveGroupTags(it)) }
+        return out.distinct()
+    }
     /** 分组的显示名：克隆组跟随源组标题。 */
     fun resolvedGroupTitle(group: com.thousandyearsofwar.ridenotes.model.GroupNode): String {
         val source = group.mirrorOf?.let { index().group(it) } ?: return group.title

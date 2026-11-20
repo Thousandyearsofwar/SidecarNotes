@@ -411,7 +411,10 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                 .ifBlank { "未命名分组" }
                                 label.text = "<html><b>${escape(arrow + cloneMark + shownTitle)}</b>$defaultMark" +
                                 flagsOf(effVisible, effLocked, effCompact) + inheritedMark +
-                                tagChipsOf(item.group.tags) + "</html>"
+                                tagChipsOf(
+                                    service.effectiveGroupTags(item.group.id),
+                                    service.effectiveGroupTags(item.group.id).toSet() - item.group.tags.toSet()
+                                ) + "</html>"
                         }
 
                         is NoteRow -> {
@@ -423,8 +426,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                             val previewRaw = com.thousandyearsofwar.ridenotes.model.NoteLinks
                                 .strip(anchorNotes.firstOrNull()?.body.orEmpty())
                                 .replace("\n", " ").trim()
-                            val tagsPlain = anchorNotes.flatMap { it.tags }.distinct()
-                                .joinToString(" ") { "#$it" }
+                            val tagsPlain = service.effectiveTags(item.anchor).joinToString(" ") { "#$it" }
                             val where = "${shortPath(item.relativePath)}:${item.anchor.startLine}"
                             val wherePlain = "\u2014 $where"
                             val fm = label.getFontMetrics(label.font)
@@ -449,7 +451,11 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                     service.effectiveLocked(item.anchor),
                                     service.effectiveCompact(item.anchor)
                                 ) +
-                                tagChipsOf(anchorNotes.flatMap { it.tags }) +
+                                tagChipsOf(
+                                    service.effectiveTags(item.anchor),
+                                    service.effectiveTags(item.anchor).toSet() -
+                                        anchorNotes.flatMap { it.tags }.toSet()
+                                ) +
                                 " <span style='color:gray'>${escape(preview)}</span>" +
                                 " <span style='color:#7a7a7a'>\u2014 ${escape(where)}</span>" +
                                 warn + "</html>"
@@ -967,7 +973,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!haystack.contains(text, ignoreCase = true)) return false
         }
         if (filterTags.isNotEmpty()) {
-            val tags = anchor.notes.flatMap { it.tags }.toSet()
+            val tags = service.effectiveTags(anchor).toSet()
             if (tags.intersect(filterTags).isEmpty()) return false
         }
         return true
@@ -1227,13 +1233,18 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     /** 锚点下所有笔记的标签，去重后按标签库颜色渲染。 */
-    private fun tagChipsOf(names: List<String>): String {
+    private fun tagChipsOf(names: List<String>, inherited: Set<String> = emptySet()): String {
         if (names.isEmpty()) return ""
         val defs = service.tags().associateBy { it.name }
         val chips = names.distinct().joinToString(" ") { name ->
             val color = defs[name]?.let { NotePalette.accent(it.color) }
             val hex = color?.let { String.format("#%02x%02x%02x", it.red, it.green, it.blue) } ?: "#7a7a7a"
-            "<span style='color:$hex'>#$name</span>"
+            // 从分组继承来的标签用灰色斜体，和自己的标签区分开
+            if (name in inherited) {
+                "<span style='color:#8a8a8a'><i>#$name</i></span>"
+            } else {
+                "<span style='color:$hex'>#$name</span>"
+            }
         }
         return " $chips"
     }
