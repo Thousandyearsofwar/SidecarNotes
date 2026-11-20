@@ -34,7 +34,6 @@ import java.awt.Rectangle
 import java.awt.RenderingHints
 import javax.swing.Icon
 import com.thousandyearsofwar.ridenotes.model.NoteLinks
-import com.thousandyearsofwar.ridenotes.model.NoteRichText
 
 /** 可视区上下各留多少行做块渲染，超出部分只保留色带和 gutter 图标。 */
 private const val MARGIN = 200
@@ -159,7 +158,6 @@ private class LineEndRenderer(private val colorIndex: Int) : EditorCustomElement
  * 标题和该锚点的所有笔记在**同一个块**里；笔记首行右侧右对齐显示时间。
  */
 private val LINK_COLOR: java.awt.Color = java.awt.Color(0x3D, 0x7E, 0xC7)
-private val CODE_COLOR: java.awt.Color = java.awt.Color(0xB0, 0x5E, 0x00)
 
 private class SummaryBlockRenderer(
     private val anchor: Anchor,
@@ -177,15 +175,8 @@ private class SummaryBlockRenderer(
     private var cachedLines: List<String> = emptyList()
 
     // 最近一次绘制时的几何信息，供点击命中测试用（paint 一定先于点击发生）
-    private var paintedLeft = 0
-    private var paintedTop = 0
-    private var paintedLines: List<String> = emptyList()
-    private var paintedMetrics: java.awt.FontMetrics? = null
 
-    /** 绘制时算好的链接命中矩形：点击时直接比较坐标，不再重新解析/测宽。 */
-    private data class PaintedLink(val x1: Int, val x2: Int, val y1: Int, val y2: Int, val target: String)
 
-    private var paintedLinks: List<PaintedLink> = emptyList()
 
     /** 行文本 → 链接列表缓存，避免每帧重复跑正则。 */
     private val linkCache = HashMap<String, List<NoteLinks.Link>>()
@@ -198,14 +189,8 @@ private class SummaryBlockRenderer(
         return parsed
     }
 
-    /**
-     * 点击位置是否落在某个锚点链接上；是则返回目标锚点 id。
-     *
-     * 几何优先用 inlay.bounds（平台给的位置），paint 记录只作兜底。
-     */
     fun linkAt(inlay: Inlay<*>, px: Int, py: Int): String? {
-        // 不再依赖绘制时缓存的矩形：滚动/换行/字体变化都可能让它过期。
-        // 直接按"当前布局"重算一次，成本只有几次 stringWidth，点击频率极低。
+        // 按当前布局重算：滚动/缩放/换行后仍与绘制一致
         val bounds = runCatching { inlay.bounds }.getOrNull() ?: return null
         val component = inlay.editor.contentComponent
         val baseMetrics = component.getFontMetrics(font)
@@ -217,20 +202,19 @@ private class SummaryBlockRenderer(
         val lineIndex = ((py - top - 2) / lineHeight).coerceIn(0, lines.size - 1)
 
         val fmCache = HashMap<Font, java.awt.FontMetrics>()
-        fun widthOfRun(runFont: Font, value: String): Int =
-            FontFallback.segments(runFont, value).sumOf { (fallbackFont, part) ->
-                fmCache.getOrPut(fallbackFont) { component.getFontMetrics(fallbackFont) }.stringWidth(part)
+        fun widthOf(value: String): Int =
+            FontFallback.segments(font, value).sumOf { (runFont, part) ->
+                fmCache.getOrPut(runFont) { component.getFontMetrics(runFont) }.stringWidth(part)
             }
 
-        fun ellipsizeTo(runFont: Font, value: String, maxWidth: Int): String {
+        fun ellipsizeTo(value: String, maxWidth: Int): String {
             if (value.isEmpty() || maxWidth <= 0) return ""
-            if (widthOfRun(runFont, value) <= maxWidth) return value
+            if (widthOf(value) <= maxWidth) return value
             var low = 0
             var high = value.length
             while (low < high) {
                 val mid = (low + high + 1) / 2
-                val candidate = value.substring(0, mid) + "…"
-                if (widthOfRun(runFont, candidate) <= maxWidth) low = mid else high = mid - 1
+                if (widthOf(value.substring(0, mid) + "…") <= maxWidth) low = mid else high = mid - 1
             }
             return if (low <= 0) "" else value.substring(0, low) + "…"
         }
@@ -239,15 +223,14 @@ private class SummaryBlockRenderer(
         var x = textLeft
         var remaining = (bounds.width - indent(inlay) - 24).coerceAtLeast(20)
 
-        for (run in NoteRichText.parseLine(lines[lineIndex])) {
+        for (part in NoteLinks.segments(lines[lineIndex])) {
             if (remaining <= 0) break
-            val runFont = fontFor(run.style)
-            val visible = ellipsizeTo(runFont, run.text, remaining)
+            val visible = ellipsizeTo(part.text, remaining)
             if (visible.isEmpty()) continue
-            val runWidth = widthOfRun(runFont, visible)
-            if (run.style.href != null && px in x..(x + runWidth)) return run.style.href
-            x += runWidth
-            remaining -= runWidth
+            val partWidth = widthOf(visible)
+            if (part.href != null && px in x..(x + partWidth)) return part.href
+            x += partWidth
+            remaining -= partWidth
         }
         return null
     }
@@ -323,12 +306,7 @@ private class SummaryBlockRenderer(
             g2.fillRoundRect(left, targetRegion.y, 3, blockHeight, 2, 2)
 
             var baseline = targetRegion.y + metrics.ascent + 2
-            val visibleLines = mutableListOf<String>()
-            val newLinks = mutableListOf<PaintedLink>()
             val metricsCache = HashMap<Font, java.awt.FontMetrics>()
-            paintedLeft = left
-            paintedTop = targetRegion.y
-            paintedMetrics = metrics
 
             lines.forEachIndexed { index, line ->
                 val stamp = stamps[index].orEmpty()
@@ -339,51 +317,24 @@ private class SummaryBlockRenderer(
                     (width - 16 - metrics.stringWidth(stamp) - 12).coerceAtLeast(20)
                 }
 
-                // 行内富文本：Markdown / HTML 的粗体、斜体、删除线、行内代码、链接、颜色
-                val runs = NoteRichText.parseLine(line)
+                // 只保留"链接"这一种行内渲染：其它 Markdown/HTML 样式一律按原样显示
                 var x = textLeft
                 var remaining = stampedWidth
-                val drawn = StringBuilder()
 
-                for (run in runs) {
+                for (part in NoteLinks.segments(line)) {
                     if (remaining <= 0) break
-                    val runFont = fontFor(run.style)
-                    val text = ellipsizeWidth(g2, metricsCache, runFont, run.text, remaining)
-                    if (text.isEmpty()) continue
-                    drawn.append(text)
+                    val visible = ellipsizeWidth(g2, metricsCache, font, part.text, remaining)
+                    if (visible.isEmpty()) continue
 
-                    g2.color = run.style.color
-                        ?: when {
-                            run.style.href != null -> LINK_COLOR
-                            run.style.code -> CODE_COLOR
-                            else -> JBColor.foreground()
-                        }
-
+                    g2.color = if (part.href != null) LINK_COLOR else JBColor.foreground()
                     val startX = x
-                    x = drawWithFallback(g2, text, x, baseline, runFont, metricsCache)
+                    x = drawWithFallback(g2, visible, x, baseline, font, metricsCache)
                     val runWidth = x - startX
-
-                    if (run.style.underline && runWidth > 0) {
+                    if (part.href != null && runWidth > 0) {
                         g2.drawLine(startX, baseline + 2, x, baseline + 2)
                     }
-                    if (run.style.strike && runWidth > 0) {
-                        g2.drawLine(startX, baseline - metrics.ascent / 3, x, baseline - metrics.ascent / 3)
-                    }
-                    if (run.style.href != null) {
-                        newLinks.add(
-                            PaintedLink(
-                                x1 = startX,
-                                x2 = x,
-                                y1 = targetRegion.y + 2 + index * metrics.height,
-                                y2 = targetRegion.y + 2 + (index + 1) * metrics.height,
-                                target = run.style.href
-                            )
-                        )
-                    }
-
                     remaining -= runWidth
                 }
-                visibleLines.add(drawn.toString())
 
                 if (stamp.isNotEmpty()) {
                     g2.color = Color(0x99, 0x99, 0x99)
@@ -392,8 +343,6 @@ private class SummaryBlockRenderer(
 
                 baseline += metrics.height
             }
-            paintedLines = visibleLines
-            paintedLinks = newLinks
 
             // 笔记之间画一条细分隔线（第一条之前不画）
             val noteStarts = stamps.keys.sorted()
@@ -438,14 +387,6 @@ private class SummaryBlockRenderer(
         cacheKey = key
         cachedLines = out.ifEmpty { listOf("") }
         return cachedLines
-    }
-
-    /** 根据样式派生字体（粗体/斜体）。 */
-    private fun fontFor(style: NoteRichText.Style): Font {
-        var f = font
-        if (style.bold) f = f.deriveFont(f.style or Font.BOLD)
-        if (style.italic) f = f.deriveFont(f.style or Font.ITALIC)
-        return f
     }
 
     /** 按字体回退逐段绘制，返回结束 x。 */
@@ -692,7 +633,7 @@ class AnchorRenderService(private val project: Project) {
         val compact = service.effectiveCompact(anchor)
         return buildString {
             append(settings.maxWidth).append(':').append(settings.fontSize).append(':').append(color)
-            append(":rt3")
+            append(":plain1")
             append(':').append(if (settings.showSummary) 1 else 0)
             append(':').append(if (compact) 1 else 0)
             append('|').append(service.resolvedTitle(anchor))
@@ -1151,7 +1092,7 @@ class AnchorRenderService(private val project: Project) {
             val resolved = svc.resolvedNotes(anchor)
             if (resolved.isNotEmpty()) append("  ·  ${resolved.size} 条")
             resolved.firstOrNull()?.let {
-                append("\n").append(com.thousandyearsofwar.ridenotes.model.NoteRichText.plain(it.body).take(80))
+                append("\n").append(com.thousandyearsofwar.ridenotes.model.NoteLinks.strip(it.body).take(80))
             }
             if (anchor.mirrorOf != null) append("\n（克隆锚点，跟随源锚点）")
             append("\n双击就地编辑")
