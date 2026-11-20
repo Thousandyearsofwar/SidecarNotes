@@ -303,6 +303,8 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
     private val tagFilterButton = javax.swing.JButton(com.thousandyearsofwar.ridenotes.RiderNotesBundle.message("panel.tagFilter"))
     private val filterTags = mutableSetOf<String>()
+    /** 筛选时各分组（含子树）命中的锚点数，用于折叠状态下的提示。 */
+    private var filterMatchCounts: Map<String, Int> = emptyMap()
     private val expandedNotes = mutableSetOf<String>()
     private var uiStateLoaded = false
 
@@ -411,6 +413,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                 .ifBlank { "未命名分组" }
                                 label.text = "<html><b>${escape(arrow + cloneMark + shownTitle)}</b>$defaultMark" +
                                 flagsOf(effVisible, effLocked, effCompact) + inheritedMark +
+                                matchHint(item) +
                                 tagChipsOf(item.group.tags) + "</html>"
                         }
 
@@ -744,6 +747,24 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         // 有筛选时忽略折叠状态，自动展开命中的分组
         val filtering = isFiltering()
 
+        // 筛选时不再自动展开：只统计每个分组子树里的命中数，折叠时显示 (N)
+        filterMatchCounts = if (filtering) {
+            val counts = HashMap<String, Int>()
+            anchorIndex.forEach { (path, pair) ->
+                val anchor = pair.second
+                if (!matchesFilter(anchor, path)) return@forEach
+                var gid: String? = anchor.groupId
+                var guard = 0
+                while (gid != null && guard++ < 64) {
+                    counts[gid] = (counts[gid] ?: 0) + 1
+                    gid = index.groups.firstOrNull { it.id == gid }?.parentId
+                }
+            }
+            counts
+        } else {
+            emptyMap()
+        }
+
         // schema 2：归属存在锚点自身，按 groupId 分组后与分组树合并
         fun anchorsOf(groupId: String?): List<Pair<String, Anchor>> =
             anchorIndex.values.filter { it.second.groupId == groupId }.sortedWith(
@@ -772,7 +793,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                     val nested = build(sourceId, depth + 1, childMirror)
                     if (nested.isNotEmpty() || !filtering) {
                         out.add(row)
-                        if (filtering || row.id !in collapsed) out.addAll(nested)
+                        if (row.id !in collapsed) out.addAll(nested)
                     }
                 } else {
                     @Suppress("UNCHECKED_CAST")
@@ -1229,6 +1250,13 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     /** 锚点下所有笔记的标签，去重后按标签库颜色渲染。 */
+    /** 筛选且分组折叠时，在标题后提示子树里有多少条命中。 */
+    private fun matchHint(item: GroupRow): String {
+        if (!isFiltering() || item.id !in collapsed) return ""
+        val sourceId = item.group.mirrorOf ?: item.group.id
+        val count = filterMatchCounts[sourceId] ?: 0
+        return if (count > 0) " <font color='#8a8a8a'>($count)</font>" else ""
+    }
     /**
      * 自己打的标签逐个体现在行里；从分组继承来的不再逐个列出，
      * 折叠成一个灰色 `+N` 计数，避免行太长。
