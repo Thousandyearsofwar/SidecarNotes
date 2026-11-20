@@ -99,6 +99,7 @@ private const val COL_VISIBLE = 0
 private const val COL_LOCK = 1
 private const val COL_COMPACT = 2
 private const val COL_NAME = 3
+private const val INDENT_STEP = 22
 
 private class DotIcon(private val color: Color) : Icon {
     override fun getIconWidth(): Int = 12
@@ -197,6 +198,7 @@ private class NotesTable(model: javax.swing.table.TableModel) : JTable(model) {
 
     override fun paint(g: Graphics) {
         super.paint(g)
+        paintGuides(g)
         if (dropRow < 0) return
         val rect = getCellRect(dropRow, 0, true)
         val g2 = g.create() as Graphics2D
@@ -216,6 +218,46 @@ private class NotesTable(model: javax.swing.table.TableModel) : JTable(model) {
         }
     }
 
+    /**
+     * 在名称列画出层级引导线：子项用 ├ / └ 连接父级，垂直延续到下一条同级或更浅的行。
+     *
+     * 只对可见行绘制，每行最多 depth 条线，开销可忽略。
+     */
+    private fun paintGuides(g: Graphics) {
+        val tableModel = model as? NotesTableModel ?: return
+        val rows = tableModel.rows
+        if (rows.isEmpty()) return
+        val g2 = g.create() as Graphics2D
+        try {
+            g2.color = Color(0x80, 0x80, 0x80, 80)
+            g2.stroke = java.awt.BasicStroke(1f)
+            val stub = INDENT_STEP / 2 - 3
+            for (i in rows.indices) {
+                val depth = rows[i].depth
+                if (depth <= 0) continue
+                val rect = getCellRect(i, COL_NAME, true)
+                val top = rect.y + 3
+                val bottom = rect.y + rect.height - 3
+                val mid = rect.y + rect.height / 2
+                val nextDepth = rows.getOrNull(i + 1)?.depth ?: -1
+                for (level in 0 until depth) {
+                    val x = rect.x + 4 + level * INDENT_STEP + INDENT_STEP / 2
+                    if (level == depth - 1) {
+                        // 本行的父级：竖线 + 横向小钩
+                        g2.drawLine(x, top, x, mid)
+                        g2.drawLine(x, mid, x + stub, mid)
+                        if (nextDepth > level) g2.drawLine(x, mid, x, bottom)
+                    } else if (nextDepth > level) {
+                        g2.drawLine(x, top, x, bottom)
+                    } else {
+                        g2.drawLine(x, top, x, mid)
+                    }
+                }
+            }
+        } finally {
+            g2.dispose()
+        }
+    }
     fun clearDrop() {
         if (dropRow != -1) {
             dropRow = -1
@@ -347,7 +389,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                 ): Component {
                     val label = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column) as JLabel
                     val item = model.rows.getOrNull(row)
-                    label.border = JBUI.Borders.emptyLeft(4 + (item?.depth ?: 0) * 16)
+                    label.border = JBUI.Borders.emptyLeft(4 + (item?.depth ?: 0) * INDENT_STEP)
                     when (item) {
                         is GroupRow -> {
                             val arrow = if (hasChildren(item.group)) {
@@ -548,7 +590,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                     COL_LOCK -> toggleLock(item)
                     COL_COMPACT -> toggleCompact(item)
                     COL_NAME -> {
-                        val arrowX = 4 + item.depth * 16 + 20
+                        val arrowX = 4 + item.depth * INDENT_STEP + 20
                         val onArrow = e.x in arrowX..(arrowX + 14)
                         when (item) {
                             is GroupRow -> {
@@ -785,7 +827,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun rowTextWidth(table: JTable, depth: Int): Int {
         val columnWidth = runCatching { table.columnModel.getColumn(COL_NAME).width }.getOrDefault(0)
         if (columnWidth <= 0) return 0
-        return (columnWidth - 4 - depth * 16 - 12).coerceAtLeast(0)
+        return (columnWidth - 4 - depth * INDENT_STEP - 12).coerceAtLeast(0)
     }
 
     /** 手动清理：删掉索引里指向已消失锚点的归属记录（会确认，不自动执行）。 */
