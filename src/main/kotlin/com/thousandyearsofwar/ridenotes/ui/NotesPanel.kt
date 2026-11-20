@@ -411,10 +411,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                 .ifBlank { "未命名分组" }
                                 label.text = "<html><b>${escape(arrow + cloneMark + shownTitle)}</b>$defaultMark" +
                                 flagsOf(effVisible, effLocked, effCompact) + inheritedMark +
-                                tagChipsOf(
-                                    service.effectiveGroupTags(item.group.id),
-                                    service.effectiveGroupTags(item.group.id).toSet() - item.group.tags.toSet()
-                                ) + "</html>"
+                                tagChipsOf(item.group.tags) + "</html>"
                         }
 
                         is NoteRow -> {
@@ -783,7 +780,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                     val (path, anchor) = child.third as Pair<String, Anchor>
                     if (!matchesFilter(anchor, path)) return@forEach
                     out.add(NoteRow(path, anchor, depth, changedById[anchor.id] ?: false, mirrorId))
-                    if (anchor.notes.size > 1 && (filtering || anchor.id in expandedNotes)) {
+                    if (anchor.notes.size > 1 && anchor.id in expandedNotes) {
                         anchor.notes.forEach { note ->
                             out.add(NoteItemRow(path, anchor, note, depth + 1, mirrorId))
                         }
