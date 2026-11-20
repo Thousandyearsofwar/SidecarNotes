@@ -423,7 +423,10 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                             val previewRaw = com.thousandyearsofwar.ridenotes.model.NoteLinks
                                 .strip(anchorNotes.firstOrNull()?.body.orEmpty())
                                 .replace("\n", " ").trim()
-                            val tagsPlain = service.effectiveTags(item.anchor).joinToString(" ") { "#$it" }
+                            val ownTags = anchorNotes.flatMap { it.tags }.distinct()
+                            val inheritedTags = service.effectiveTags(item.anchor).toSet() - ownTags.toSet()
+                            val tagsPlain = ownTags.joinToString(" ") { "#$it" } +
+                                (if (inheritedTags.isNotEmpty()) " +${inheritedTags.size}" else "")
                             val where = "${shortPath(item.relativePath)}:${item.anchor.startLine}"
                             val wherePlain = "\u2014 $where"
                             val fm = label.getFontMetrics(label.font)
@@ -448,11 +451,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
                                     service.effectiveLocked(item.anchor),
                                     service.effectiveCompact(item.anchor)
                                 ) +
-                                tagChipsOf(
-                                    service.effectiveTags(item.anchor),
-                                    service.effectiveTags(item.anchor).toSet() -
-                                        anchorNotes.flatMap { it.tags }.toSet()
-                                ) +
+                                tagChipsOf(ownTags, inheritedTags.size) +
                                 " <span style='color:gray'>${escape(preview)}</span>" +
                                 " <span style='color:#7a7a7a'>\u2014 ${escape(where)}</span>" +
                                 warn + "</html>"
@@ -1230,20 +1229,28 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     /** 锚点下所有笔记的标签，去重后按标签库颜色渲染。 */
-    private fun tagChipsOf(names: List<String>, inherited: Set<String> = emptySet()): String {
-        if (names.isEmpty()) return ""
+    /**
+     * 自己打的标签逐个体现在行里；从分组继承来的不再逐个列出，
+     * 折叠成一个灰色 `+N` 计数，避免行太长。
+     */
+    private fun tagChipsOf(names: List<String>, inheritedCount: Int = 0): String {
         val defs = service.tags().associateBy { it.name }
         val chips = names.distinct().joinToString(" ") { name ->
             val color = defs[name]?.let { NotePalette.accent(it.color) }
             val hex = color?.let { String.format("#%02x%02x%02x", it.red, it.green, it.blue) } ?: "#7a7a7a"
-            // 从分组继承来的标签用灰色斜体，和自己的标签区分开
-            if (name in inherited) {
-                "<span style='color:#8a8a8a'><i>#$name</i></span>"
-            } else {
-                "<span style='color:$hex'>#$name</span>"
-            }
+            "<span style='color:$hex'>#$name</span>"
         }
-        return " $chips"
+        val badge = if (inheritedCount > 0) {
+            "<span style='color:#8a8a8a'>+$inheritedCount</span>"
+        } else {
+            ""
+        }
+        return when {
+            chips.isEmpty() && badge.isEmpty() -> ""
+            chips.isEmpty() -> " $badge"
+            badge.isEmpty() -> " $chips"
+            else -> " $chips $badge"
+        }
     }
 
     private fun escape(text: String): String =
