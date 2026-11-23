@@ -898,7 +898,8 @@ class AnchorRenderService(private val project: Project) {
             }
             val highlighter = editor.markupModel.addRangeHighlighter(
                 start, end,
-                HighlighterLayer.SELECTION - 1,
+                // 色带只是背景：层级要低于选区 / 变量使用处高亮，否则会把它们整个盖住
+                HighlighterLayer.SYNTAX - 1,
                 attributes,
                 HighlighterTargetArea.EXACT_RANGE
             )
