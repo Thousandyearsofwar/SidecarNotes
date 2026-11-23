@@ -1062,11 +1062,73 @@ class NoteAnchorService(private val project: Project) {
         saveIndex()
     }
 
-    fun renameTag(id: String, name: String) {
+    /**
+     * 重命名标签，并把所有**已经挂载**的地方一起改名：
+     * 分组链上的标签、各分片里笔记的标签。
+     *
+     * 返回 false 表示名字为空或与已有标签重名（未做任何修改）。
+     */
+    fun renameTag(id: String, name: String): Boolean {
         val clean = name.trim().removePrefix("#")
-        if (clean.isEmpty()) return
-        index().tags.firstOrNull { it.id == id }?.name = clean
+        if (clean.isEmpty()) return false
+        val index = index()
+        val tag = index.tags.firstOrNull { it.id == id } ?: return false
+        val old = tag.name
+        if (old == clean) return true
+        if (index.tags.any { it.id != id && it.name == clean }) return false
+
+        tag.name = clean
+        renameTagReferences(index, old, clean)
         saveIndex()
+        notifyChanged("")
+        return true
+    }
+
+    /** 把标签名从 old 换成 new（分组 + 所有分片里的笔记）。 */
+    private fun renameTagReferences(
+        index: com.thousandyearsofwar.ridenotes.model.ProjectIndex,
+        old: String,
+        new: String
+    ) {
+        val rename: (List<String>) -> List<String> = { names ->
+            if (old !in names) names else names.map { if (it == old) new else it }.distinct()
+        }
+
+        index.groups.forEach { group -> group.tags = rename(group.tags).toMutableList() }
+
+        fun renameIn(list: List<Anchor>) =
+            list.any { anchor -> anchor.notes.any { old in it.tags } }
+
+        val stamp = java.time.Instant.now().toString()
+        cache.forEach { (path, list) ->
+            if (!renameIn(list)) return@forEach
+            list.forEach { anchor ->
+                anchor.notes.forEach { note ->
+                    if (old in note.tags) {
+                        note.tags = rename(note.tags)
+                        note.updatedAt = stamp
+                    }
+                }
+            }
+            persist(path)
+        }
+
+        AnchorStore.listAll(project).forEach { shard ->
+            if (cache.containsKey(shard.file)) return@forEach
+            if (!renameIn(shard.anchors)) return@forEach
+            val list = shard.anchors.sortedBy { it.startOffset }.toMutableList()
+            list.forEach { anchor ->
+                anchor.notes.forEach { note ->
+                    if (old in note.tags) {
+                        note.tags = rename(note.tags)
+                        note.updatedAt = stamp
+                    }
+                }
+            }
+            cache[shard.file] = list
+            AnchorStore.save(project, shard.file, list)
+            recordChange("shard", shard.file)
+        }
     }
 
     fun setTagColor(id: String, color: Int) {

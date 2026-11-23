@@ -246,7 +246,11 @@ class TagLibraryDialog(private val project: Project) : DialogWrapper(project) {
 
             is TagDef -> {
                 val name = Messages.showInputDialog(project, "标签名", "重命名", null, p.name, null) ?: return
-                service.renameTag(p.id, name)
+                if (!service.renameTag(p.id, name)) {
+                    com.thousandyearsofwar.ridenotes.util.NoteLog.notify(
+                        project, "标签名重复或为空，未重命名"
+                    )
+                }
             }
 
             else -> return
