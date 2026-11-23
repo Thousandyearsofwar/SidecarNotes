@@ -990,7 +990,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!haystack.contains(text, ignoreCase = true)) return false
         }
         if (filterTags.isNotEmpty()) {
-            val tags = service.effectiveTags(anchor).toSet()
+            val tags = service.effectiveTags(anchor).mapNotNull { service.tagIdOf(it) }.toSet()
             if (tags.intersect(filterTags).isEmpty()) return false
         }
         return true
@@ -1003,9 +1003,9 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun showTagFilterMenu() {
         val menu = javax.swing.JPopupMenu()
         service.tags().sortedBy { it.name }.forEach { tag ->
-            val item = javax.swing.JCheckBoxMenuItem("#${tag.name}", tag.name in filterTags)
+            val item = javax.swing.JCheckBoxMenuItem("#${tag.name}", tag.id in filterTags)
             item.addActionListener {
-                if (!filterTags.remove(tag.name)) filterTags.add(tag.name)
+                if (!filterTags.remove(tag.id)) filterTags.add(tag.id)
                 updateTagFilterLabel()
                 scheduleRefresh()
             }
@@ -1090,8 +1090,8 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         fun fill(target: javax.swing.JMenu, tags: List<com.thousandyearsofwar.ridenotes.model.TagDef>) {
             tags.sortedBy { it.name }.forEach { tag ->
-                val item = javax.swing.JCheckBoxMenuItem("#${tag.name}", tag.name in applied)
-                item.addActionListener { onPick(tag.name) }
+                val item = javax.swing.JCheckBoxMenuItem("#${tag.name}", tag.id in applied)
+                item.addActionListener { onPick(tag.id) }
                 target.add(item)
             }
         }
@@ -1116,7 +1116,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         menu.addSeparator()
         menu.add("新建标签…").addActionListener {
             val name = Messages.showInputDialog(project, "标签名（不用打 #）", "新建标签", null, "", null) ?: return@addActionListener
-            service.addTag(name)?.let { onPick(it.name) }
+            service.addTag(name)?.let { onPick(it.id) }
         }
 
         val point = lastPoint ?: java.awt.Point(20, 20)
@@ -1131,27 +1131,28 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         val noteItems = selectedNoteItems()
         if (groups.isEmpty() && noteRows.isEmpty() && noteItems.isEmpty()) return
 
+        fun idsOf(refs: Collection<String>) = refs.mapNotNull { service.tagIdOf(it) }.toSet()
         val applied = mutableSetOf<String>()
-        groups.forEach { applied.addAll(it.group.tags) }
-        noteItems.forEach { applied.addAll(it.note.tags) }
-        noteRows.forEach { row -> row.anchor.notes.firstOrNull()?.let { applied.addAll(it.tags) } }
+        groups.forEach { applied.addAll(idsOf(it.group.tags)) }
+        noteItems.forEach { applied.addAll(idsOf(it.note.tags)) }
+        noteRows.forEach { row -> row.anchor.notes.firstOrNull()?.let { applied.addAll(idsOf(it.tags)) } }
 
         chooseTag(applied) { name ->
             applyToSelection("修改标签") {
                 groups.forEach { group ->
-                    if (group.group.tags.contains(name)) service.removeTagFromGroup(group.group.id, name)
+                    if (service.hasTag(group.group.tags, name)) service.removeTagFromGroup(group.group.id, name)
                     else service.addTagToGroup(group.group.id, name)
                 }
                 noteRows.forEach { row ->
                     val file = fileOf(row.relativePath) ?: return@forEach
                     row.anchor.notes.forEach { note ->
-                        if (note.tags.contains(name)) service.removeTagFromNote(file, row.anchor.id, note.id, name)
+                        if (service.hasTag(note.tags, name)) service.removeTagFromNote(file, row.anchor.id, note.id, name)
                         else service.addTagToNote(file, row.anchor.id, note.id, name)
                     }
                 }
                 noteItems.forEach { item ->
                     val file = fileOf(item.relativePath) ?: return@forEach
-                    if (item.note.tags.contains(name)) service.removeTagFromNote(file, item.anchor.id, item.note.id, name)
+                    if (service.hasTag(item.note.tags, name)) service.removeTagFromNote(file, item.anchor.id, item.note.id, name)
                     else service.addTagToNote(file, item.anchor.id, item.note.id, name)
                 }
             }
@@ -1161,7 +1162,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun attachTagToGroup(row: GroupRow) {
         chooseTag(row.group.tags.toSet()) { name ->
             undoable(firstFileInGroup(row.group.id), "修改标签") {
-                if (row.group.tags.contains(name)) service.removeTagFromGroup(row.group.id, name)
+                if (service.hasTag(row.group.tags, name)) service.removeTagFromGroup(row.group.id, name)
                 else service.addTagToGroup(row.group.id, name)
             }
             refresh()
@@ -1172,7 +1173,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         chooseTag(row.note.tags.toSet()) { name ->
             val file = fileOf(row.relativePath) ?: return@chooseTag
             undoable(file, "修改标签") {
-                if (row.note.tags.contains(name)) service.removeTagFromNote(file, row.anchor.id, row.note.id, name)
+                if (service.hasTag(row.note.tags, name)) service.removeTagFromNote(file, row.anchor.id, row.note.id, name)
                 else service.addTagToNote(file, row.anchor.id, row.note.id, name)
             }
             AnchorRenderService.get(project).refresh(file)
@@ -1185,7 +1186,7 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
         chooseTag(note.tags.toSet()) { name ->
             val file = fileOf(row.relativePath) ?: return@chooseTag
             undoable(file, "修改标签") {
-                if (note.tags.contains(name)) service.removeTagFromNote(file, row.anchor.id, note.id, name)
+                if (service.hasTag(note.tags, name)) service.removeTagFromNote(file, row.anchor.id, note.id, name)
                 else service.addTagToNote(file, row.anchor.id, note.id, name)
             }
             AnchorRenderService.get(project).refresh(file)
@@ -1261,12 +1262,14 @@ class NotesPanel(private val project: Project) : JPanel(BorderLayout()) {
      * 自己打的标签逐个体现在行里；从分组继承来的不再逐个列出，
      * 折叠成一个灰色 `+N` 计数，避免行太长。
      */
-    private fun tagChipsOf(names: List<String>, inheritedCount: Int = 0): String {
-        val defs = service.tags().associateBy { it.name }
-        val chips = names.distinct().joinToString(" ") { name ->
-            val color = defs[name]?.let { NotePalette.accent(it.color) }
+    private fun tagChipsOf(refs: List<String>, inheritedCount: Int = 0): String {
+        val defs = service.tags().associateBy { it.id }
+        val chips = refs.distinct().joinToString(" ") { ref ->
+            val def = defs[service.tagIdOf(ref) ?: ref]
+            val color = def?.let { NotePalette.accent(it.color) }
             val hex = color?.let { String.format("#%02x%02x%02x", it.red, it.green, it.blue) } ?: "#7a7a7a"
-            "<span style='color:$hex'>#$name</span>"
+            // 解析不到定义时退回原始引用（旧数据），显示为灰色
+            "<span style='color:$hex'>#${def?.name ?: ref}</span>"
         }
         val badge = if (inheritedCount > 0) {
             "<span style='color:#8a8a8a'>+$inheritedCount</span>"

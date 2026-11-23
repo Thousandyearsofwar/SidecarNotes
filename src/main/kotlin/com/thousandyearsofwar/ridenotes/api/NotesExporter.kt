@@ -61,7 +61,7 @@ object NotesExporter {
                         appendLine()
                     }
                     anchor.notes.forEach { note ->
-                        appendLine("- **${STAMP.format(java.time.Instant.parse(note.createdAt))}** ${note.body.replace("\n", " ")}${tagSuffix(note.tags)}")
+                        appendLine("- **${STAMP.format(java.time.Instant.parse(note.createdAt))}** ${note.body.replace("\n", " ")}${tagSuffix(project, note.tags)}")
                     }
                     appendLine()
                 }
@@ -89,7 +89,7 @@ object NotesExporter {
             anchor.notes.forEach { note ->
                 sb.appendLine(
                     "- **${STAMP.format(java.time.Instant.parse(note.createdAt))}** " +
-                        note.body.replace("\n", "  \n  ") + tagSuffix(note.tags)
+                        note.body.replace("\n", "  \n  ") + tagSuffix(project, note.tags)
                 )
             }
             sb.appendLine()
@@ -101,8 +101,11 @@ object NotesExporter {
         return if (title.isEmpty()) "" else " · $title"
     }
 
-    private fun tagSuffix(tags: List<String>): String =
-        if (tags.isEmpty()) "" else tags.joinToString(" ") { " `#$it`" }
+    private fun tagSuffix(project: Project, tags: List<String>): String {
+        if (tags.isEmpty()) return ""
+        val service = com.thousandyearsofwar.ridenotes.service.NoteAnchorService.get(project)
+        return tags.joinToString(" ") { " `#${service.tagNameOf(it)}`" }
+    }
 
     /** 取锚定行范围作为摘录（最多 12 行）。 */
     private fun codeExcerpt(project: Project, relativePath: String, anchor: Anchor): String? {

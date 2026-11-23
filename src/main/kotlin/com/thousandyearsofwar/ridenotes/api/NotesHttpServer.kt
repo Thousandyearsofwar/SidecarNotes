@@ -188,6 +188,7 @@ class NotesHttpServer(private val project: Project) {
             path == "/anchors" && exchange.requestMethod == "GET" -> {
                 val filter = queryParam(query, "file")
                 val text = queryParam(query, "q")?.lowercase()
+                val anchorService = NoteAnchorService.get(project)
                 val list = onEdt {
                     com.thousandyearsofwar.ridenotes.model.AnchorStore.listAll(project)
                         .filter { filter == null || it.file == filter }
@@ -202,7 +203,7 @@ class NotesHttpServer(private val project: Project) {
                                     "color" to anchor.color,
                                     "createdBy" to anchor.createdBy,
                                     "notes" to anchor.notes.size,
-                                    "tags" to anchor.notes.flatMap { it.tags }.distinct(),
+                                    "tags" to anchor.notes.flatMap { it.tags }.distinct().map { anchorService.tagNameOf(it) },
                                     "text" to anchor.notes.joinToString("\n") { it.body }
                                 )
                             }
@@ -469,7 +470,8 @@ class NotesHttpServer(private val project: Project) {
                 mapOf(
                     "id" to g.id, "title" to g.title, "color" to g.color,
                     "visible" to g.visible, "locked" to g.locked, "compact" to g.compact,
-                    "parentId" to g.parentId, "order" to g.order, "tags" to g.tags
+                    "parentId" to g.parentId, "order" to g.order,
+                    "tags" to g.tags.map { service.tagNameOf(it) }
                 )
             },
             // schema 2：归属存在锚点里，这里从锚点派生，保持旧响应结构

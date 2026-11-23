@@ -182,7 +182,10 @@ class NoteAnchorService(private val project: Project) {
         val note = anchor.notes.firstOrNull { it.id == noteId } ?: return
         if (body != null) note.body = body.trim()
         if (tags != null) {
-            note.tags = tags.map { it.trim().removePrefix("#") }.filter { it.isNotEmpty() }.distinct()
+            note.tags = tags.map { it.trim().removePrefix("#") }
+                .filter { it.isNotEmpty() }
+                .map { tagIdOf(it) ?: it }
+                .distinct()
         }
         note.updatedAt = java.time.Instant.now().toString()
         persistAndNotify(file)
@@ -383,6 +386,7 @@ class NoteAnchorService(private val project: Project) {
             runCatching { migrateOrder(loaded) }
                 .onFailure { com.thousandyearsofwar.ridenotes.util.NoteLog.warn("order migration failed: ${it.message}") }
             runCatching { migrateVirtualCloneGroups(loaded) }
+            runCatching { migrateTagRefs(loaded) }
                 .onFailure { com.thousandyearsofwar.ridenotes.util.NoteLog.warn("clone migration failed: ${it.message}") }
         }
         return loaded
@@ -1041,18 +1045,38 @@ class NoteAnchorService(private val project: Project) {
         return tag
     }
 
+    /** 标签引用统一成 id（兼容旧数据里存的名字）。 */
+    fun tagIdOf(ref: String): String? {
+        val index = index()
+        index.tags.firstOrNull { it.id == ref }?.let { return it.id }
+        index.tags.firstOrNull { it.name == ref }?.let { return it.id }
+        return null
+    }
+
+    fun tagNameOf(ref: String): String =
+        index().tags.firstOrNull { it.id == ref }?.name
+            ?: index().tags.firstOrNull { it.name == ref }?.name
+            ?: ref
+
+    /** 判断某个容器（笔记/分组）上是否挂着这个标签，id 与旧名字都认。 */
+    fun hasTag(refs: List<String>, tagRef: String): Boolean {
+        val id = tagIdOf(tagRef) ?: return refs.contains(tagRef)
+        return refs.any { tagIdOf(it) == id || it == tagRef }
+    }
+
     fun removeTag(id: String) {
-        val tag = index().tags.firstOrNull { it.id == id } ?: return
-        index().tags.remove(tag)
-        // 同时把这个名字从所有分组和笔记上摘掉，避免残留
-        index().groups.forEach { group -> group.tags.remove(tag.name) }
+        val index = index()
+        val tag = index.tags.firstOrNull { it.id == id } ?: return
+        index.tags.remove(tag)
+        val aliases = setOf(tag.id, tag.name)
+        index.groups.forEach { group -> group.tags.removeAll { it in aliases } }
         AnchorStore.listAll(project).forEach { file ->
             val list = mutableAnchors(file.file)
             var changed = false
             list.forEach { anchor ->
                 anchor.notes.forEach { note ->
-                    if (note.tags.contains(tag.name)) {
-                        note.tags = note.tags - tag.name
+                    if (note.tags.any { it in aliases }) {
+                        note.tags = note.tags.filterNot { it in aliases }
                         changed = true
                     }
                 }
@@ -1063,8 +1087,8 @@ class NoteAnchorService(private val project: Project) {
     }
 
     /**
-     * 重命名标签，并把所有**已经挂载**的地方一起改名：
-     * 分组链上的标签、各分片里笔记的标签。
+     * 重命名标签。引用存的是标签 **id**，所以只改 TagDef 即可，
+     * 已经挂载到分组/笔记上的标签会自动跟着新名字走。
      *
      * 返回 false 表示名字为空或与已有标签重名（未做任何修改）。
      */
@@ -1073,64 +1097,57 @@ class NoteAnchorService(private val project: Project) {
         if (clean.isEmpty()) return false
         val index = index()
         val tag = index.tags.firstOrNull { it.id == id } ?: return false
-        val old = tag.name
-        if (old == clean) return true
+        if (tag.name == clean) return true
         if (index.tags.any { it.id != id && it.name == clean }) return false
-
         tag.name = clean
-        renameTagReferences(index, old, clean)
         saveIndex()
         notifyChanged("")
         return true
     }
 
-    /** 把标签名从 old 换成 new（分组 + 所有分片里的笔记）。 */
-    private fun renameTagReferences(
-        index: com.thousandyearsofwar.ridenotes.model.ProjectIndex,
-        old: String,
-        new: String
-    ) {
-        val rename: (List<String>) -> List<String> = { names ->
-            if (old !in names) names else names.map { if (it == old) new else it }.distinct()
+    /**
+     * schema 4 → 5：标签引用从"名字"改成"id"。
+     *
+     * 之后重命名标签只需要改 TagDef，引用不用动。
+     */
+    private fun migrateTagRefs(index: com.thousandyearsofwar.ridenotes.model.ProjectIndex) {
+        if (index.schema >= 5) return
+        val byName = index.tags.associate { it.name to it.id }
+        fun toId(ref: String): String = byName[ref] ?: ref
+
+        index.groups.forEach { group ->
+            group.tags = group.tags.map { toId(it) }.distinct().toMutableList()
         }
 
-        index.groups.forEach { group -> group.tags = rename(group.tags).toMutableList() }
-
-        fun renameIn(list: List<Anchor>) =
-            list.any { anchor -> anchor.notes.any { old in it.tags } }
-
-        val stamp = java.time.Instant.now().toString()
-        cache.forEach { (path, list) ->
-            if (!renameIn(list)) return@forEach
+        fun convert(list: List<Anchor>): Boolean {
+            var changed = false
             list.forEach { anchor ->
                 anchor.notes.forEach { note ->
-                    if (old in note.tags) {
-                        note.tags = rename(note.tags)
-                        note.updatedAt = stamp
+                    val mapped = note.tags.map { toId(it) }.distinct()
+                    if (mapped != note.tags) {
+                        note.tags = mapped
+                        changed = true
                     }
                 }
             }
-            persist(path)
+            return changed
         }
 
+        cache.forEach { (path, list) ->
+            if (convert(list)) persist(path)
+        }
         AnchorStore.listAll(project).forEach { shard ->
             if (cache.containsKey(shard.file)) return@forEach
-            if (!renameIn(shard.anchors)) return@forEach
             val list = shard.anchors.sortedBy { it.startOffset }.toMutableList()
-            list.forEach { anchor ->
-                anchor.notes.forEach { note ->
-                    if (old in note.tags) {
-                        note.tags = rename(note.tags)
-                        note.updatedAt = stamp
-                    }
-                }
-            }
+            if (!convert(list)) return@forEach
             cache[shard.file] = list
             AnchorStore.save(project, shard.file, list)
-            recordChange("shard", shard.file)
         }
-    }
 
+        index.schema = 5
+        saveIndex()
+        com.thousandyearsofwar.ridenotes.util.NoteLog.info("migrated tag references to ids")
+    }
     fun setTagColor(id: String, color: Int) {
         index().tags.firstOrNull { it.id == id }?.color = color
         saveIndex()
@@ -1141,8 +1158,10 @@ class NoteAnchorService(private val project: Project) {
         val anchor = anchorsFor(file).firstOrNull { it.id == anchorId } ?: return
         val note = anchor.notes.firstOrNull { it.id == noteId } ?: return
         val clean = tagName.trim().removePrefix("#")
-        if (clean.isEmpty() || note.tags.contains(clean)) return
-        note.tags = (note.tags + clean).distinct()
+        if (clean.isEmpty()) return
+        val ref = tagIdOf(clean) ?: clean
+        if (hasTag(note.tags, ref)) return
+        note.tags = (note.tags + ref).distinct()
         note.updatedAt = java.time.Instant.now().toString()
         persistAndNotify(file)
     }
@@ -1151,21 +1170,26 @@ class NoteAnchorService(private val project: Project) {
     fun addTagToGroup(groupId: String, tagName: String) {
         val clean = tagName.trim().removePrefix("#")
         if (clean.isEmpty()) return
+        val ref = tagIdOf(clean) ?: clean
         index().group(groupId)?.let { group ->
-            if (!group.tags.contains(clean)) group.tags = (group.tags + clean).distinct().toMutableList()
+            if (!hasTag(group.tags, ref)) group.tags = (group.tags + ref).distinct().toMutableList()
         }
         saveIndex()
     }
 
     fun removeTagFromGroup(groupId: String, tagName: String) {
-        index().group(groupId)?.tags?.remove(tagName)
+        val ref = tagIdOf(tagName) ?: tagName
+        index().group(groupId)?.let { group ->
+            group.tags.removeAll { it == ref || it == tagName }
+        }
         saveIndex()
     }
 
     fun removeTagFromNote(file: VirtualFile, anchorId: String, noteId: String, tagName: String) {
         val anchor = anchorsFor(file).firstOrNull { it.id == anchorId } ?: return
         val note = anchor.notes.firstOrNull { it.id == noteId } ?: return
-        note.tags = note.tags - tagName
+        val ref = tagIdOf(tagName) ?: tagName
+        note.tags = note.tags.filterNot { it == ref || it == tagName }
         persistAndNotify(file)
     }
 

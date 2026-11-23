@@ -144,11 +144,11 @@ Expand-Archive build\distributions\RiderNotes-0.98.0.zip -DestinationPath $plugi
 - 写入走临时文件 + 原子替换
 - **提交到 git 即可团队共享**
 
-`_project.json`（schema 4）：
+`_project.json`（schema 5）：
 
 ```jsonc
 {
-  "schema": 4,
+  "schema": 5,
   "groups": [{ "id", "title", "parentId", "orderValue", "color", "visible",
                 "locked", "compact", "tags": [], "mirrorOf": null }],
   "tags": [{ "id", "name", "color", "groupId" }],
@@ -158,11 +158,11 @@ Expand-Archive build\distributions\RiderNotes-0.98.0.zip -DestinationPath $plugi
 }
 ```
 
-分片（schema 4，锚点直接携带归属）：
+分片（schema 5，锚点直接携带归属）：
 
 ```jsonc
 {
-  "schema": 4,
+  "schema": 5,
   "file": "相对路径",
   "anchors": [{
     "id", "startLine", "endLine", "anchorText", "anchorSha1",
