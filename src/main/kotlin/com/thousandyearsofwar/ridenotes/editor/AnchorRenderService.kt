@@ -159,6 +159,38 @@ private class LineEndRenderer(private val colorIndex: Int) : EditorCustomElement
  */
 private val LINK_COLOR: java.awt.Color = java.awt.Color(0x3D, 0x7E, 0xC7)
 
+/**
+ * 把 tab 展开成空格。
+ *
+ * AWT 的 `drawString` 不展开制表符（画出来宽度为 0），笔记里用 Tab 缩进时
+ * 看起来会"没有缩进"，所以在绘制/命中测试前先统一展开。
+ */
+internal fun expandTabs(text: String, tabSize: Int = 4): String {
+    if ('\t' !in text) return text
+    val sb = StringBuilder(text.length + 8)
+    var column = 0
+    text.forEach { ch ->
+        when (ch) {
+            '\n' -> {
+                sb.append(ch)
+                column = 0
+            }
+
+            '\t' -> {
+                val next = tabSize - (column % tabSize)
+                repeat(next) { sb.append(' ') }
+                column += next
+            }
+
+            else -> {
+                sb.append(ch)
+                column++
+            }
+        }
+    }
+    return sb.toString()
+}
+
 private class SummaryBlockRenderer(
     private val anchor: Anchor,
     private val text: String,
@@ -194,7 +226,7 @@ private class SummaryBlockRenderer(
         val bounds = runCatching { inlay.bounds }.getOrNull() ?: return null
         val component = inlay.editor.contentComponent
         val baseMetrics = component.getFontMetrics(font)
-        val lines = text.split('\n').map { it.trimEnd() }.ifEmpty { listOf("") }
+        val lines = expandTabs(text).split('\n').map { it.trimEnd() }.ifEmpty { listOf("") }
         val lineHeight = baseMetrics.height
 
         val top = bounds.y
@@ -383,7 +415,7 @@ private class SummaryBlockRenderer(
         val key = "all|$text"
         if (key == cacheKey && cachedLines.isNotEmpty()) return cachedLines
 
-        val out = text.split('\n').map { it.trimEnd() }
+        val out = expandTabs(text).split('\n').map { it.trimEnd() }
         cacheKey = key
         cachedLines = out.ifEmpty { listOf("") }
         return cachedLines
@@ -898,8 +930,9 @@ class AnchorRenderService(private val project: Project) {
             }
             val highlighter = editor.markupModel.addRangeHighlighter(
                 start, end,
-                // 色带只是背景：层级要低于选区 / 变量使用处高亮，否则会把它们整个盖住
-                HighlighterLayer.SYNTAX - 1,
+                // 高于光标行背景（CARET_ROW=2000），低于使用处高亮与选区（≈5900/6000）：
+                // 既不会盖住 IDE 的高亮，也不会在光标落到该行时被行背景吃掉
+                HighlighterLayer.ADDITIONAL_SYNTAX,
                 attributes,
                 HighlighterTargetArea.EXACT_RANGE
             )
