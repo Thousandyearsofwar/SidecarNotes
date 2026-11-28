@@ -48,6 +48,11 @@ object CodeHighlight {
                 val lexer = highlighter.highlightingLexer
                 val scheme = EditorColorsManager.getInstance().globalScheme
 
+                val facts = SemanticClassifier.facts(project, file)
+                val identifierColor = scheme.getAttributes(
+                    com.intellij.openapi.editor.DefaultLanguageHighlighterColors.IDENTIFIER
+                )?.foregroundColor
+
                 blocks.map { lines ->
                     val out = lines.map { mutableListOf<CodeToken>() }
                     val joined = lines.joinToString("\n")
@@ -72,12 +77,70 @@ object CodeHighlight {
                         }
                         lexer.advance()
                     }
+                    applySemantic(out, facts, scheme, identifierColor)
                     out
                 }
             }
         }.getOrElse { plain(blocks) }
     }
 
+    private val IDENTIFIER = Regex("^[A-Za-z_]\\w*$")
+
+    /**
+     * 在词法结果上补语义色：
+     * - 文件里声明过的类型 / 宏 / 常量 → 用对应 key
+     * - 后面紧跟 `(` 的标识符 → 方法
+     * - `->` / `.` 后的标识符 → 字段；`::` 后 → 静态字段
+     * - 全大写（如 MAX_NUM）→ 常量
+     *
+     * 只覆盖"词法器当作普通标识符"的 token，不会把关键字改色。
+     */
+    private fun applySemantic(
+        lines: List<MutableList<CodeToken>>,
+        facts: SemanticClassifier.Facts,
+        scheme: com.intellij.openapi.editor.colors.EditorColorsScheme,
+        identifierColor: Color?
+    ) {
+        fun isIdentifier(token: CodeToken): Boolean =
+            IDENTIFIER.matches(token.text) && (token.color == null || token.color == identifierColor)
+
+        lines.forEachIndexed { lineIndex, tokens ->
+            tokens.forEachIndexed { i, token ->
+                if (!isIdentifier(token)) return@forEachIndexed
+
+                val next = tokens.drop(i + 1).firstOrNull { it.text.isNotBlank() }?.text?.trimStart()
+                    ?: lines.getOrNull(lineIndex + 1)?.firstOrNull { it.text.isNotBlank() }?.text?.trimStart()
+                val prev = tokens.take(i).lastOrNull { it.text.isNotBlank() }?.text?.trimEnd()
+                    ?: lines.getOrNull(lineIndex - 1)?.lastOrNull { it.text.isNotBlank() }?.text?.trimEnd()
+
+                val key = when {
+                    next?.startsWith("(") == true ->
+                        com.intellij.openapi.editor.DefaultLanguageHighlighterColors.INSTANCE_METHOD
+
+                    prev?.endsWith("::") == true ->
+                        com.intellij.openapi.editor.DefaultLanguageHighlighterColors.STATIC_FIELD
+
+                    prev?.endsWith("->") == true || prev?.endsWith(".") == true ->
+                        com.intellij.openapi.editor.DefaultLanguageHighlighterColors.INSTANCE_FIELD
+
+                    facts.keys.containsKey(token.text) -> facts.keys[token.text]
+
+                    token.text.length >= 2 && token.text.any { it.isLetter() } &&
+                        token.text.all { it.isUpperCase() || it.isDigit() || it == '_' } ->
+                        com.intellij.openapi.editor.DefaultLanguageHighlighterColors.CONSTANT
+
+                    else -> null
+                } ?: return@forEachIndexed
+
+                val attrs = runCatching { scheme.getAttributes(key) }.getOrNull() ?: return@forEachIndexed
+                tokens[i] = token.copy(
+                    color = attrs.foregroundColor ?: token.color,
+                    bold = token.bold || (attrs.fontType and Font.BOLD != 0),
+                    italic = token.italic || (attrs.fontType and Font.ITALIC != 0)
+                )
+            }
+        }
+    }
     private fun plain(blocks: List<List<String>>): List<List<List<CodeToken>>> =
         blocks.map { lines -> lines.map { line -> listOf(CodeToken(line, null)) } }
 

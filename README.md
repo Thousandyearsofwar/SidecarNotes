@@ -128,6 +128,7 @@ for (FRDGPassHandle Pass : Passes)
 - 语言以**当前文件**为准（`.cpp` 里写 C# 会按 C++ 高亮），暂不支持 ` ```csharp ` 指定语言
 - 代码行里的链接不做点击命中
 - 颜色来自 `Settings → Editor → Color Scheme`，换主题会跟着变
+- 词法之上还有一层**语义分类**：类型/宏/常量/字段/方法尽量按 IDE 语义色着色，结果按文件修改戳缓存
 ## 笔记里的链接
 
 ```markdown
