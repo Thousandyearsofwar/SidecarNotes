@@ -197,14 +197,21 @@ private class SummaryBlockRenderer(
     private val indentColumns: Int,
     private val compact: Boolean,
     private val color: Int,
-    private val stamps: Map<Int, String>
+    private val stamps: Map<Int, String>,
+    private val projectRef: com.intellij.openapi.project.Project?,
+    private val fileRef: com.intellij.openapi.vfs.VirtualFile?
 ) : EditorCustomElementRenderer {
 
     private val settings = com.thousandyearsofwar.ridenotes.settings.NotesSettings.get()
     private val font: Font = settings.summaryFont()
 
-    private var cacheKey = ""
-    private var cachedLines: List<String> = emptyList()
+    /** 解析后的显示行：codeBlock >= 0 表示落在 ``` 围栏里。 */
+    private data class BlockLine(val text: String, val codeBlock: Int, val original: Int)
+
+    private val blockLines: List<BlockLine> by lazy { parseBlockLines() }
+
+    /** 代码行的词法着色结果，按解析后的行号索引。 */
+    private val codeLineTokens: Map<Int, List<CodeToken>> by lazy { buildCodeTokens() }
 
     // 最近一次绘制时的几何信息，供点击命中测试用（paint 一定先于点击发生）
 
@@ -226,12 +233,14 @@ private class SummaryBlockRenderer(
         val bounds = runCatching { inlay.bounds }.getOrNull() ?: return null
         val component = inlay.editor.contentComponent
         val baseMetrics = component.getFontMetrics(font)
-        val lines = expandTabs(text).split('\n').map { it.trimEnd() }.ifEmpty { listOf("") }
+        val lines = blockLines
         val lineHeight = baseMetrics.height
 
         val top = bounds.y
         if (py < top || py > top + lines.size * lineHeight + 8) return null
         val lineIndex = ((py - top - 2) / lineHeight).coerceIn(0, lines.size - 1)
+        val blockLine = lines[lineIndex]
+        if (blockLine.codeBlock >= 0) return null   // 代码行里的链接不做命中
 
         val fmCache = HashMap<Font, java.awt.FontMetrics>()
         fun widthOf(value: String): Int =
@@ -255,7 +264,7 @@ private class SummaryBlockRenderer(
         var x = textLeft
         var remaining = (bounds.width - indent(inlay) - 24).coerceAtLeast(20)
 
-        for (part in NoteLinks.segments(lines[lineIndex])) {
+        for (part in NoteLinks.segments(blockLine.text)) {
             if (remaining <= 0) break
             val visible = ellipsizeTo(part.text, remaining)
             if (visible.isEmpty()) continue
@@ -294,7 +303,7 @@ private class SummaryBlockRenderer(
 
     override fun calcHeightInPixels(inlay: Inlay<*>): Int {
         val metrics = metrics(inlay)
-        return (renderLines(metrics).size * metrics.height + 6).coerceAtLeast(16)
+        return (blockLines.size * metrics.height + 6).coerceAtLeast(16)
     }
 
     override fun paint(inlay: Inlay<*>, g: Graphics, targetRegion: Rectangle, textAttributes: TextAttributes) {
@@ -306,7 +315,7 @@ private class SummaryBlockRenderer(
             g2.font = font
 
             val metrics = g2.fontMetrics
-            val lines = renderLines(metrics)
+            val lines = blockLines
             val blockHeight = lines.size * metrics.height + 4
 
             // 关键：把绘制裁到编辑器的**可见矩形**。
@@ -340,8 +349,9 @@ private class SummaryBlockRenderer(
             var baseline = targetRegion.y + metrics.ascent + 2
             val metricsCache = HashMap<Font, java.awt.FontMetrics>()
 
-            lines.forEachIndexed { index, line ->
-                val stamp = stamps[index].orEmpty()
+            lines.forEachIndexed { index, blockLine ->
+                val line = blockLine.text
+                val stamp = stamps[blockLine.original].orEmpty()
                 val textLeft = left + 8
                 val stampedWidth = if (stamp.isEmpty()) {
                     (width - 16).coerceAtLeast(20)
@@ -349,9 +359,19 @@ private class SummaryBlockRenderer(
                     (width - 16 - metrics.stringWidth(stamp) - 12).coerceAtLeast(20)
                 }
 
-                // 只保留"链接"这一种行内渲染：其它 Markdown/HTML 样式一律按原样显示
+                // ``` 围栏里的代码走词法着色；其它行只保留"链接"这一种行内渲染
                 var x = textLeft
                 var remaining = stampedWidth
+
+                if (blockLine.codeBlock >= 0) {
+                    drawCodeLine(g2, codeLineTokens[index].orEmpty(), x, baseline, remaining, metricsCache)
+                    if (stamp.isNotEmpty()) {
+                        g2.color = Color(0x99, 0x99, 0x99)
+                        g2.drawString(stamp, left + width - 8 - metrics.stringWidth(stamp), baseline)
+                    }
+                    baseline += metrics.height
+                    return@forEachIndexed
+                }
 
                 for (part in NoteLinks.segments(line)) {
                     if (remaining <= 0) break
@@ -410,17 +430,82 @@ private class SummaryBlockRenderer(
         return indentColumns * editorMetrics.charWidth(' ').coerceAtLeast(1)
     }
 
-    /** 行数不设上限：简洁模式已经在外层把每条压成一行了。 */
-    private fun renderLines(metrics: java.awt.FontMetrics): List<String> {
-        val key = "all|$text"
-        if (key == cacheKey && cachedLines.isNotEmpty()) return cachedLines
-
-        val out = expandTabs(text).split('\n').map { it.trimEnd() }
-        cacheKey = key
-        cachedLines = out.ifEmpty { listOf("") }
-        return cachedLines
+    /** 把正文解析成"显示行 + 代码块归属"，顺便吃掉 ``` 围栏。 */
+    private fun parseBlockLines(): List<BlockLine> {
+        val out = mutableListOf<BlockLine>()
+        var block = -1
+        var nextBlock = 0
+        expandTabs(text).split('\n').forEachIndexed { index, raw ->
+            val line = raw.trimEnd()
+            if (line.trimStart().startsWith("```")) {
+                if (block < 0) {
+                    block = nextBlock++
+                } else {
+                    block = -1
+                }
+                return@forEachIndexed
+            }
+            out.add(BlockLine(line, block, index))
+        }
+        return out.ifEmpty { listOf(BlockLine("", -1, 0)) }
     }
 
+    /** 用宿主的语法高亮给每个代码块上色，再按解析后的行号摊平。 */
+    private fun buildCodeTokens(): Map<Int, List<CodeToken>> {
+        val project = projectRef ?: return emptyMap()
+        val file = fileRef ?: return emptyMap()
+
+        val blocks = linkedMapOf<Int, MutableList<String>>()
+        val lineIndexes = linkedMapOf<Int, MutableList<Int>>()
+        blockLines.forEachIndexed { index, line ->
+            if (line.codeBlock < 0) return@forEachIndexed
+            blocks.getOrPut(line.codeBlock) { mutableListOf() }.add(line.text)
+            lineIndexes.getOrPut(line.codeBlock) { mutableListOf() }.add(index)
+        }
+        if (blocks.isEmpty()) return emptyMap()
+
+        val tokenized = CodeHighlight.tokenize(project, file, blocks.values.toList())
+        val out = HashMap<Int, List<CodeToken>>()
+        blocks.keys.forEachIndexed { blockIndex, key ->
+            val perLine = tokenized.getOrNull(blockIndex).orEmpty()
+            val indexes = lineIndexes[key].orEmpty()
+            perLine.forEachIndexed { i, tokens ->
+                if (i < indexes.size) out[indexes[i]] = tokens
+            }
+        }
+        return out
+    }
+
+    /** 画一行着色后的代码，返回结束 x。 */
+    private fun drawCodeLine(
+        g2: Graphics2D,
+        tokens: List<CodeToken>,
+        startX: Int,
+        baseline: Int,
+        maxWidth: Int,
+        metricsCache: MutableMap<Font, java.awt.FontMetrics>
+    ): Int {
+        var x = startX
+        var remaining = maxWidth
+        for (token in tokens) {
+            if (remaining <= 0) break
+            val tokenFont = fontForToken(token)
+            val visible = ellipsizeWidth(g2, metricsCache, tokenFont, token.text, remaining)
+            if (visible.isEmpty()) continue
+            g2.color = token.color ?: JBColor.foreground()
+            val before = x
+            x = drawWithFallback(g2, visible, x, baseline, tokenFont, metricsCache)
+            remaining -= (x - before)
+        }
+        return x
+    }
+
+    private fun fontForToken(token: CodeToken): Font {
+        var f = font
+        if (token.bold) f = f.deriveFont(f.style or Font.BOLD)
+        if (token.italic) f = f.deriveFont(f.style or Font.ITALIC)
+        return f
+    }
     /** 按字体回退逐段绘制，返回结束 x。 */
     private fun drawWithFallback(
         g: Graphics2D,
@@ -1057,7 +1142,10 @@ class AnchorRenderService(private val project: Project) {
 
                 val inlay = editor.inlayModel.addBlockElement(
                     offset, true, false, 50,
-                    SummaryBlockRenderer(item.anchor, text, indentColumns, compact, item.color, stamps)
+                    SummaryBlockRenderer(
+                        item.anchor, text, indentColumns, compact, item.color, stamps,
+                        project, file
+                    )
                 )
                 if (inlay != null) {
                     inlay.putUserData(ANCHOR_ID, item.anchor.id)

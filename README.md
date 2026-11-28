@@ -109,6 +109,25 @@ Expand-Archive build\distributions\RiderNotes-0.98.0.zip -DestinationPath $plugi
 三列开关：**显示**（不渲染）、**锁定**（禁止改）、**简洁**（每条笔记压成一行）。
 分组上的开关会被子项继承，带 `（继承）` 标记；克隆组是不可编辑的只读镜像。
 
+## 笔记里写代码
+
+用 ``` 围栏包起来的代码会在摘要块里**按当前文件的语法着色**（颜色取自 IDE 配色方案，跟随深/浅主题）：
+
+````markdown
+```cpp
+for (FRDGPassHandle Pass : Passes)
+{
+    if (Pass->IsCulled()) continue;
+    State->Flags |= TransitionFlags;
+}
+```
+````
+
+- ` ``` ` 围栏本身不显示，里面的行用宿主文件的 `Language` 做词法着色（关键字/字符串/数字/注释/类型名）
+- 不做语义分析；跨行注释、字符串能正确续接
+- 语言以**当前文件**为准（`.cpp` 里写 C# 会按 C++ 高亮），暂不支持 ` ```csharp ` 指定语言
+- 代码行里的链接不做点击命中
+- 颜色来自 `Settings → Editor → Color Scheme`，换主题会跟着变
 ## 笔记里的链接
 
 ```markdown
